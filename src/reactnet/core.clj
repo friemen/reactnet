@@ -5,9 +5,9 @@
 
 ;; TODOs
 ;; - Support complex results
-;; - Use return value of silent-push! to decide if links should be evaluated
 ;; - Support for merge
 ;; - Create API for changing the network
+;; - Add pause! and resume!
 
 ;; Examples
 ;; - Introduce async execution
@@ -21,6 +21,15 @@
 
 ;; Reactive:
 ;; Contains a time-varying value. Supports functions silent-push! and get-value
+
+(defprotocol IReactive
+  (silent-push! [r value]
+    "Sets reactive's value, returns true if any
+  re-evaluation of the network should be triggered.")
+  (get-value [r]
+    "Returns current value of this reactive."))
+
+
 
 ;; Link:
 ;; Combines m input reactives, n output reactives, a link function f.
@@ -56,13 +65,9 @@
 ;;  :value
 
 
+
 ;; ---------------------------------------------------------------------------
 ;; Factories
-
-
-(defprotocol IReactive
-  (silent-push! [r value])
-  (get-value [r]))
 
 
 (defn make-link
@@ -182,13 +187,13 @@
 
 (defn push!
   [n reactive value]
-  (silent-push! reactive value)
-  (dosync (let [links (get @(:links-map n) reactive)]
-            (alter (:pending-queue n) into links)
-            (deliver @(:command n) :continue)))
+  (when (silent-push! reactive value)
+    (dosync (let [links (get @(:links-map n) reactive)]
+              (alter (:pending-queue n) into links)
+              (deliver @(:command n) :continue))))
   value)
 
-(defn eval-link!
+(defn- eval-link!
   [n {:keys [f inputs outputs level]}]
   (let [level-map @(:level-map n)
         links-map @(:links-map n)
@@ -207,7 +212,8 @@
          (remove nil?))))
 
 
-(defn propagate!
+(defn- propagate!
+  "Executes one propagation cycle."
   [n]
   (dosync
    (let [pending @(:pending-queue n)]
@@ -228,14 +234,16 @@
                        (into (empty q))))))))))
 
 
-(defn run-network
+(defn run!
+  "Starts the network as a long-running future."
   [n]
   (future
     (try (reset! (:command n) (promise))
          (println "Ready")
          (loop []
+           ;; blocks until push! delivers
            (let [command (-> n :command deref deref)]
-             (reset! (:command n) (promise))
+             (reset! (:command n) (promise)) ;; immediately replace promise
              (when (not= :exit command)
                (propagate! n)
                (Thread/sleep 2000)
@@ -246,7 +254,9 @@
     (println "Exiting.")))
 
 
-(defn stop-network
+(defn stop!
+  "Sends the :exit command to the network. The network will finish its
+  current propagation cycle, if any."
   [n]
   (dosync (alter (:pending-queue n) empty))
   (deliver @(:command n) :exit))
@@ -261,8 +271,10 @@
 (defrecord React [label a completed? error?]
   IReactive
   (silent-push! [this value]
-    (println (str-react this) "<-" value)
-    (reset! a value))
+    (when (not= @a value)
+      (println (str-react this) "<-" value)
+      (reset! a value)
+      true))
   (get-value [this] @a)
   clojure.lang.IDeref
   (deref [this] @a))
