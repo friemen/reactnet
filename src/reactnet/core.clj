@@ -4,13 +4,13 @@
             [clojure.data.priority-map :refer [priority-map-by]]))
 
 ;; TODOs
-;; - Link reactives to a network
+;; - Associate reactives with their network
 ;; - Introduce error and completed state in protocol
 ;; - Create combinators like map, filter, lift, reduce, delay, take
 ;; - Limit max number of items in pending queue (back pressure)
 ;; - Create API for changing the network
 ;; - Add pause! and resume!
-
+;; ... and many more ...
 
 
 
@@ -22,7 +22,7 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
-  (silent-push! [r value]
+  (silent-set! [r value]
     "Sets reactive's value, returns true if any
   re-evaluation of the network should be triggered.")
   (get-value [r]
@@ -188,7 +188,7 @@
   [{:keys [links-map level-map] :as n}
    {:keys [reactive value]}]
   {:pre [n]}
-  (when (silent-push! reactive value)
+  (when (silent-set! reactive value)
     (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
       #_ (println (->> links (map str-link) (s/join ", ")))
       (when-let [{:keys [f inputs outputs level]} (first links)]
@@ -201,7 +201,7 @@
                                              ;; for those that are upstream
                                              ;; push! will add links to the pending queue
                                              nil)
-                                         (do (silent-push! reactive value)
+                                         (do (silent-set! reactive value)
                                              ;; these links will be returned for processing within the cycle
                                              (links-map reactive)))))
                              (remove nil?))]
@@ -239,11 +239,11 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Sample data
+;; A trivial implementation of the IReactive protocol
 
 (defrecord React [label a completed? error?]
   IReactive
-  (silent-push! [this value]
+  (silent-set! [this value]
     (when (not= @a value)
       (println (str-react this) "<-" value)
       (reset! a value)
@@ -260,6 +260,9 @@
   (React. label (atom value) false false))
 
 
+;; ---------------------------------------------------------------------------
+;; Example network
+
 (def rs {:x (react "x" 0)
          :y (react "y" 2)
          :x+y (react "x+y" 0)
@@ -270,3 +273,6 @@
                             (make-link "*" (map* *) [(:x rs) (:x+y rs)] [(:z rs)])
                             (make-link "reduce-conj" (reduce* conj) [(:z rs)] [(:zs rs)]))
               :error-handler (fn [_ ex] (.printStackTrace ex))))
+
+#_ (doseq [x (range 10)]
+     (push! n (:x rs) x))

@@ -1,5 +1,5 @@
 (defproject reactnet "0.1.0-SNAPSHOT"
-  :description "A reactive network"
+  :description "Consistent value propagation through a reactive network"
   :url "https://github.com/friemen/reactnet"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
