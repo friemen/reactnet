@@ -5,7 +5,7 @@
 
 ;; TODOs
 ;; - Link reactives to a network
-;; - Link function takes a link and a stimulus
+;; - Introduce error and completed state in protocol
 ;; - Create combinators like map, filter, lift, reduce, delay, take
 ;; - Limit max number of items in pending queue (back pressure)
 ;; - Create API for changing the network
@@ -38,15 +38,15 @@
 ;;  :level    The level within the reactive network (max level of all input reactives).
 
 ;; Link function:
-;; A function taking 3 args (causing source reactive, inputs, outputs)
-;; which returns a Result map.
+;; A function taking 4 args (reactive which caused the evaluation, it's value,
+;; input reactives, output reactives) which returns a Result map.
 
 ;; Result:
-;; A link function produces either a map containing ::results or another value.
-;; The value is pushed into to the output reactives.
-;; The ::results map contains the following entries
-;;   ::results    A map {reactive->value} containing the values for
-;;                each output reactive.
+;; A map with the following entries
+;;  :output-values    A map {reactive->value} containing the values for
+;;                    each output reactive.
+;; :+links            Links to add to the network
+;; :-links            Links to remove from the network
 
 ;; Network:
 ;; A map containing 
@@ -180,42 +180,62 @@
 ;; ---------------------------------------------------------------------------
 ;; Propagation network
 
-(defn- eval-link!
-  [{:keys [level-map links-map] :as n}
-   {:keys [f inputs outputs level]}]
-  (let [result (apply f (map get-value inputs))]
-    (->> outputs
-         (mapcat (fn [reactive]
-                   ;; only changes to downstream reactives will be handled in this cycle
-                   (if (< (level-map reactive) level)
-                     (do (push! n reactive result)
-                         ;; for those that are upstream
-                         ;; push! will add links to the pending queue
-                         nil)
-                     (do (silent-push! reactive result)
-                         ;; these links will be returned for processing within the cycle
-                         (links-map reactive)))))
-         (remove nil?))))
+(declare push!)
 
 
 (defn- propagate!
   "Executes one propagation cycle."
-  [{:keys [links-map] :as n}
+  [{:keys [links-map level-map] :as n}
    {:keys [reactive value]}]
   {:pre [n]}
-  (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
-    #_ (println (->> links (map str-link) (s/join ", ")))
-    (when-let [l (first links)]
-      (let [new-links (eval-link! n l)]
-        (recur (->> links rest (concat new-links) (sort-by :level (comparator <)))))))
+  (when (silent-push! reactive value)
+    (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
+      #_ (println (->> links (map str-link) (s/join ", ")))
+      (when-let [{:keys [f inputs outputs level]} (first links)]
+        (let [result-map (f reactive value inputs outputs)
+              new-links (->> result-map :output-values
+                             (mapcat (fn [[reactive value]]
+                                       ;; only changes to downstream reactives will be handled in this cycle
+                                       (if (< (level-map reactive) level)
+                                         (do (push! n reactive value)
+                                             ;; for those that are upstream
+                                             ;; push! will add links to the pending queue
+                                             nil)
+                                         (do (silent-push! reactive value)
+                                             ;; these links will be returned for processing within the cycle
+                                             (links-map reactive)))))
+                             (remove nil?))]
+          (recur (->> links rest (concat new-links) (sort-by :level (comparator <)) distinct))))))
   n)
 
 
 (defn push!
   [n-agent reactive value]
-  (when (silent-push! reactive value)
-    (send-off n-agent propagate! {:reactive reactive :value value}))
+  (send-off n-agent propagate! {:reactive reactive :value value})
   value)
+
+
+(defn map*
+  [f]
+  (fn [reactive value inputs outputs]
+    (let [result (->> inputs (map get-value) (apply f))]
+      {:output-values (->> outputs (reduce (fn [m r] (assoc m r result)) {}))})))
+
+
+(defn reduce*
+  [f]
+  (fn [reactive value inputs outputs]
+    {:pre [(= 1 (count outputs))]}
+    (let [accu-reactive (first outputs)
+          accu-value    (get-value accu-reactive)
+          result (->> inputs (map get-value) (cons accu-value) (apply f))]
+      {:output-values {accu-reactive result}})))
+
+
+(defn merge*
+  [reactive value inputs outputs]
+  {:pre [(= 1 (count outputs))]}
+  {:output-values {(first outputs) value}})
 
 
 ;; ---------------------------------------------------------------------------
@@ -243,9 +263,10 @@
 (def rs {:x (react "x" 0)
          :y (react "y" 2)
          :x+y (react "x+y" 0)
-         :z (react "z" 0)})
+         :z (react "z" 0)
+         :zs (react "zs" [])})
 
-(def n (agent (make-network (make-link "+" + [(:x rs) (:y rs)] [(:x+y rs)])
-                            (make-link "*" * [(:x rs) (:x+y rs)] [(:z rs)]))
+(def n (agent (make-network (make-link "+" (map* +) [(:x rs) (:y rs)] [(:x+y rs)])
+                            (make-link "*" (map* *) [(:x rs) (:x+y rs)] [(:z rs)])
+                            (make-link "reduce-conj" (reduce* conj) [(:z rs)] [(:zs rs)]))
               :error-handler (fn [_ ex] (.printStackTrace ex))))
-
