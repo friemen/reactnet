@@ -4,23 +4,22 @@
             [clojure.data.priority-map :refer [priority-map-by]]))
 
 ;; TODOs
-;; - Support complex results
-;; - Support for merge
+;; - Link reactives to a network
+;; - Link function takes a link and a stimulus
+;; - Create combinators like map, filter, lift, reduce, delay, take
+;; - Limit max number of items in pending queue (back pressure)
 ;; - Create API for changing the network
 ;; - Add pause! and resume!
 
-;; Examples
-;; - Introduce async execution
-;; - Play around with take, buffer or drop
-;; - Introduce throtteling
-;; - Implement usual suspects like map, filter, remove, reduce
+
 
 
 ;; ---------------------------------------------------------------------------
 ;; Concepts
 
 ;; Reactive:
-;; Contains a time-varying value. Supports functions silent-push! and get-value
+;; Contains a time-varying value.
+;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
   (silent-push! [r value]
@@ -30,14 +29,13 @@
     "Returns current value of this reactive."))
 
 
-
 ;; Link:
-;; Combines m input reactives, n output reactives, a link function f.
-;;  :label
-;;  :inputs   Input
-;;  :outputs
-;;  :f
-;;  :level
+;; A map that combines m input reactives, n output reactives and a link function f.
+;;  :label    Label for pretty printing.
+;;  :inputs   Input reactives.
+;;  :outputs  Output reactives.
+;;  :f        A link function with the arity of the number of input reactives.
+;;  :level    The level within the reactive network (max level of all input reactives).
 
 ;; Link function:
 ;; A function taking 3 args (causing source reactive, inputs, outputs)
@@ -92,12 +90,10 @@
   [& links]
   (let [level-map (reactive-level-map links)
         leveled-links (map #(assoc % :level (level-map %)) links)]
-    {:reactives (ref (reactives-from-links leveled-links))
-     :links (ref leveled-links)
-     :command (atom (promise))
-     :pending-queue (ref [])
-     :links-map (ref (reactive-links-map leveled-links))
-     :level-map (ref level-map)}))
+    {:reactives (reactives-from-links leveled-links)
+     :links leveled-links
+     :links-map (reactive-links-map leveled-links)
+     :level-map level-map}))
 
 
 ;; ---------------------------------------------------------------------------
@@ -119,9 +115,9 @@
   (str "Stimulus " (str-react (:reactive s)) " <- " (:value s)))
 
 (defn pp
-  [n]
-  (let [links @(:links n)
-        reactives @(:reactives n)]
+  [n-agent]
+  (let [links (:links @n-agent)
+        reactives (:reactives @n-agent)]
     (println (str "Values\n" (s/join ", " (map str-react reactives))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
 
@@ -184,20 +180,10 @@
 ;; ---------------------------------------------------------------------------
 ;; Propagation network
 
-
-(defn push!
-  [n reactive value]
-  (when (silent-push! reactive value)
-    (dosync (let [links (get @(:links-map n) reactive)]
-              (alter (:pending-queue n) into links)
-              (deliver @(:command n) :continue))))
-  value)
-
 (defn- eval-link!
-  [n {:keys [f inputs outputs level]}]
-  (let [level-map @(:level-map n)
-        links-map @(:links-map n)
-        result (apply f (map get-value inputs))]
+  [{:keys [level-map links-map] :as n}
+   {:keys [f inputs outputs level]}]
+  (let [result (apply f (map get-value inputs))]
     (->> outputs
          (mapcat (fn [reactive]
                    ;; only changes to downstream reactives will be handled in this cycle
@@ -214,55 +200,22 @@
 
 (defn- propagate!
   "Executes one propagation cycle."
-  [n]
-  (dosync
-   (let [pending @(:pending-queue n)]
-     (alter (:pending-queue n) empty)
-     (loop [q (->> pending
-                   (map (juxt identity :level))
-                   (into (priority-map-by (comparator <))))]
-       #_ (println (->> q (map first) (map str-link) (s/join ", ")))
-       
-       (if-let [l (ffirst q)]
-         #_ (println (str-link l))
-         (let [current-links (->> q rest (map first))
-               new-links (eval-link! n l)]
-           (recur (->> current-links
-                       (concat new-links)
-                       distinct
-                       (map (juxt identity :level))
-                       (into (empty q))))))))))
+  [{:keys [links-map] :as n}
+   {:keys [reactive value]}]
+  {:pre [n]}
+  (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
+    #_ (println (->> links (map str-link) (s/join ", ")))
+    (when-let [l (first links)]
+      (let [new-links (eval-link! n l)]
+        (recur (->> links rest (concat new-links) (sort-by :level (comparator <)))))))
+  n)
 
 
-(defn run!
-  "Starts the network as a long-running future."
-  [n]
-  (future
-    (try (reset! (:command n) (promise))
-         (println "Ready")
-         (loop []
-           ;; blocks until push! delivers
-           (let [command (-> n :command deref deref)]
-             (reset! (:command n) (promise)) ;; immediately replace promise
-             (when (not= :exit command)
-               (propagate! n)
-               (Thread/sleep 2000)
-               (recur))))
-         (catch Exception ex
-           (do (println ex)
-               (.printStackTrace ex))))
-    (println "Exiting.")))
-
-
-(defn stop!
-  "Sends the :exit command to the network. The network will finish its
-  current propagation cycle, if any."
-  [n]
-  (dosync (alter (:pending-queue n) empty))
-  (deliver @(:command n) :exit))
-
-
-
+(defn push!
+  [n-agent reactive value]
+  (when (silent-push! reactive value)
+    (send-off n-agent propagate! {:reactive reactive :value value}))
+  value)
 
 
 ;; ---------------------------------------------------------------------------
@@ -292,6 +245,7 @@
          :x+y (react "x+y" 0)
          :z (react "z" 0)})
 
-(def n (make-network (make-link "+" + [(:x rs) (:y rs)] [(:x+y rs)])
-                     (make-link "*" * [(:x rs) (:x+y rs)] [(:z rs)])))
+(def n (agent (make-network (make-link "+" + [(:x rs) (:y rs)] [(:x+y rs)])
+                            (make-link "*" * [(:x rs) (:x+y rs)] [(:z rs)]))
+              :error-handler (fn [_ ex] (.printStackTrace ex))))
 
