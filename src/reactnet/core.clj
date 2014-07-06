@@ -1,7 +1,6 @@
 (ns reactnet.core
   (:require [clojure.set :refer [union]]
-            [clojure.string :as s]
-            [clojure.data.priority-map :refer [priority-map-by]]))
+            [clojure.string :as s]))
 
 ;; TODOs
 ;; - Associate reactives with their network
@@ -22,8 +21,8 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
-  (silent-set! [r value]
-    "Sets reactive's value, returns true if any
+  (silent-set! [r value-timestamp-pair]
+    "Sets a pair of value and timestamp, returns true if any
   re-evaluation of the network should be triggered.")
   (get-value [r]
     "Returns current value of this reactive."))
@@ -39,7 +38,7 @@
 
 ;; Link function:
 ;; A function taking 4 args (reactive which caused the evaluation, it's value,
-;; input reactives, output reactives) which returns a Result map.
+;; the timestamp, input reactives, output reactives) which returns a Result map.
 
 ;; Result:
 ;; A map with the following entries
@@ -59,9 +58,9 @@
 
 ;; External Stimulus:
 ;; A map containing
-;;  :reactive
-;;  :value
-
+;;  :reactive     The reactive whose value is to be set
+;;  :value        The value to set
+;;  :timestamp    The timestamp in ms when the value was pushed
 
 
 ;; ---------------------------------------------------------------------------
@@ -77,9 +76,10 @@
    :level 0})
 
 (defn make-stimulus
-  [reactive value]
+  [reactive value timestamp]
   {:reactive reactive
-   :value value})
+   :value value
+   :timestamp timestamp})
 
 
 (declare reactives-from-links
@@ -186,22 +186,22 @@
 (defn- propagate!
   "Executes one propagation cycle."
   [{:keys [links-map level-map] :as n}
-   {:keys [reactive value]}]
+   {:keys [reactive value timestamp]}]
   {:pre [n]}
-  (when (silent-set! reactive value)
+  (when (silent-set! reactive [value timestamp])
     (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
       #_ (println (->> links (map str-link) (s/join ", ")))
       (when-let [{:keys [f inputs outputs level]} (first links)]
-        (let [result-map (f reactive value inputs outputs)
+        (let [result-map (f reactive value timestamp inputs outputs)
               new-links (->> result-map :output-values
                              (mapcat (fn [[reactive value]]
                                        ;; only changes to downstream reactives will be handled in this cycle
                                        (if (< (level-map reactive) level)
-                                         (do (push! n reactive value)
+                                         (do (push! n reactive value timestamp)
                                              ;; for those that are upstream
                                              ;; push! will add links to the pending queue
                                              nil)
-                                         (do (silent-set! reactive value)
+                                         (do (silent-set! reactive [value timestamp])
                                              ;; these links will be returned for processing within the cycle
                                              (links-map reactive)))))
                              (remove nil?))]
@@ -210,21 +210,23 @@
 
 
 (defn push!
-  [n-agent reactive value]
-  (send-off n-agent propagate! {:reactive reactive :value value})
-  value)
+  ([n-agent reactive value]
+     (push! n-agent reactive value (System/currentTimeMillis)))
+  ([n-agent reactive value timestamp]
+     (send-off n-agent propagate! (make-stimulus reactive value timestamp))
+     value))
 
 
 (defn map*
   [f]
-  (fn [reactive value inputs outputs]
+  (fn [reactive value timestamp inputs outputs]
     (let [result (->> inputs (map get-value) (apply f))]
       {:output-values (->> outputs (reduce (fn [m r] (assoc m r result)) {}))})))
 
 
 (defn reduce*
   [f]
-  (fn [reactive value inputs outputs]
+  (fn [reactive value timestamp inputs outputs]
     {:pre [(= 1 (count outputs))]}
     (let [accu-reactive (first outputs)
           accu-value    (get-value accu-reactive)
@@ -233,7 +235,7 @@
 
 
 (defn merge*
-  [reactive value inputs outputs]
+  [reactive value timestamp inputs outputs]
   {:pre [(= 1 (count outputs))]}
   {:output-values {(first outputs) value}})
 
@@ -241,33 +243,36 @@
 ;; ---------------------------------------------------------------------------
 ;; A trivial implementation of the IReactive protocol
 
-(defrecord React [label a completed? error?]
+(defrecord React [label a eventstream? completed? error?]
   IReactive
-  (silent-set! [this value]
-    (when (not= @a value)
+  (silent-set! [this [value timestamp]]
+    (when (or eventstream? (not= (first @a) value))
       (println (str-react this) "<-" value)
-      (reset! a value)
+      (reset! a [value timestamp])
       true))
-  (get-value [this] @a)
+  (get-value [this] (first @a))
   clojure.lang.IDeref
-  (deref [this] @a))
+  (deref [this] (first @a)))
 
 (prefer-method print-method java.util.Map clojure.lang.IDeref)
 (prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
 
-(defn react
+(defn behavior
   [label value]
-  (React. label (atom value) false false))
+  (React. label (atom [value (System/currentTimeMillis)]) false false false))
 
+(defn eventstream
+  [label]
+  (React. label (atom [nil (System/currentTimeMillis)]) true false false))
 
 ;; ---------------------------------------------------------------------------
 ;; Example network
 
-(def rs {:x (react "x" 0)
-         :y (react "y" 2)
-         :x+y (react "x+y" 0)
-         :z (react "z" 0)
-         :zs (react "zs" [])})
+(def rs {:x (behavior "x" 0)
+         :y (behavior "y" 2)
+         :x+y (behavior "x+y" 0)
+         :z (behavior "z" 0)
+         :zs (behavior "zs" [])})
 
 (def n (agent (make-network (make-link "+" (map* +) [(:x rs) (:y rs)] [(:x+y rs)])
                             (make-link "*" (map* *) [(:x rs) (:x+y rs)] [(:z rs)])

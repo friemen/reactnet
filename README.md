@@ -19,11 +19,11 @@ Define the map of reactives:
 
 ```clojure
 (use 'reactnet.core)
-(def rs {:x (react "x" 0)
-         :y (react "y" 2)
-         :x+y (react "x+y" 0)
-         :z (react "z" 0)
-         :zs (react "zs" [])})
+(def rs {:x (behavior "x" 0)
+         :y (behavior "y" 2)
+         :x+y (behavior "x+y" 0)
+         :z (behavior "z" 0)
+         :zs (behavior "zs" [])})
 ```
 
 Specify a network by listing all its links:
