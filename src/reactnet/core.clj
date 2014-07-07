@@ -203,7 +203,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Propagation network
+;; Propagation within network
 
 (declare push!)
 
@@ -242,6 +242,9 @@
      value))
 
 
+(defn output-value-map
+  [value outputs]
+  (->> outputs (reduce (fn [m r] (assoc m r value)) {})))
 
 
 ;; ===========================================================================
@@ -266,13 +269,15 @@
 (prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
 
 (defn behavior
-  [n-agent label value]
-  (React. (-> n-agent deref :id)
-          label
-          (atom [value (System/currentTimeMillis)])
-          false
-          false
-          false))
+  ([n-agent label]
+     (behavior n-agent label nil))
+  ([n-agent label value]
+     (React. (-> n-agent deref :id)
+             label
+             (atom [value (System/currentTimeMillis)])
+             false
+             false
+             false)))
 
 (defn behavior?
   [r]
@@ -296,43 +301,67 @@
 ;; Some combinators
 
 
-(defn derive-behavior
-  [label f inputs]
+(defn derive-new
+  [factory-fn label f inputs]
   {:pre [(seq inputs)]}
   (let [n-id (network-id (first inputs))
         n-agent (network-by-id n-id)
-        new-r (behavior n-agent label nil)]
+        new-r (factory-fn n-agent label)]
     (add-link! n-agent (make-link label f inputs [new-r]))
     new-r))
 
 
+
 (defn rmap
   [f & reactives]
-  (derive-behavior "map"
-                   (fn [reactive value timestamp inputs outputs]
-                     (let [result (->> inputs (map get-value) (apply f))]
-                       {:output-values (->> outputs (reduce (fn [m r] (assoc m r result)) {}))}))
-                   reactives))
+  (derive-new eventstream
+              "map"
+              (fn [reactive value timestamp inputs outputs]
+                (let [result (->> inputs (map get-value) (apply f))]
+                  {:output-values (output-value-map result outputs)}))
+              reactives))
 
 
 (defn rreduce
   [f initial-value & reactives]
-  (derive-behavior "reduce"
-                   (fn [reactive value timestamp inputs outputs]
-                     {:pre [(= 1 (count outputs))]}
-                     (let [accu-reactive (first outputs)
-                           accu-value    (or (get-value accu-reactive) initial-value)
-                           result (->> inputs (map get-value) (cons accu-value) (apply f))]
-                       {:output-values {accu-reactive result}}))
-                   reactives))
+  (derive-new behavior
+              "reduce"
+              (fn [reactive value timestamp inputs outputs]
+                {:pre [(= 1 (count outputs))]}
+                (let [accu-reactive (first outputs)
+                      accu-value    (or (get-value accu-reactive) initial-value)
+                      result (->> inputs (map get-value) (cons accu-value) (apply f))]
+                  {:output-values {accu-reactive result}}))
+              reactives))
 
 
-(defn merge*
-  [reactive value timestamp inputs outputs]
-  {:pre [(= 1 (count outputs))]}
-  {:output-values {(first outputs) value}})
+(defn rmerge
+  [& reactives]
+  (derive-new eventstream
+              "merge"
+              (fn [reactive value timestamp inputs outputs]
+                {:output-values (output-value-map value outputs)})
+              reactives))
 
 
+(defn rfilter
+  [pred reactive]
+  (derive-new eventstream
+              "filter"
+              (fn [reactive value timestamp inputs outputs]
+                {:output-values (if (pred value)
+                                  (output-value-map value outputs)
+                                  {})})
+              [reactive]))
+
+(defn subscribe
+  [f reactive]
+  (let [n-id (network-id reactive)
+        n-agent (network-by-id n-id)
+        callback-fn (fn [reactive value timestamp inputs outputs]
+                      (f value timestamp))]
+    (add-link! n-agent (make-link "subscriber" callback-fn [reactive] []))
+    reactive))
 
 
 ;; ---------------------------------------------------------------------------
@@ -345,6 +374,15 @@
 (def x+y (rmap + x y))
 (def zs (->> (rmap * x x+y)
              (rreduce conj [])))
+
+(def e1 (eventstream n "e1"))
+(def e2 (eventstream n "e2"))
+
+(def f (->> e1 (rfilter (partial = "foo"))))
+
+(subscribe (fn [value timestamp] (println value timestamp))
+           (rmerge f e2))
+
 
 #_ (doseq [i (range 10)]
      (push! n x i))
