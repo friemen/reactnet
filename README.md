@@ -9,11 +9,11 @@ Goal is a core for a reactive library that is designed to avoid
 inconsistencies and handles infinite loops caused by cyclic
 dependencies gracefully.
 
-Can't tell at the moment how far this approach will bring me...
+Could be the core of a [reactor](https://github.com/friemen/reactor) re-implementation.
 
 ## Usage
 
-This is under construction. What is shown below is not meant as an API.
+This is under construction. What is shown below is not a final API.
 
 Define some reactives and their combinations:
 
@@ -34,7 +34,7 @@ The `push!` function sends an external stimulus to the agent representing the ne
 
 ```clojure
 (doseq [i (range 10)]
-  (push! n x i))
+  (push! x i))
 ;= nil
 ; x:0 <- 1
 ; map: <- 3
@@ -75,8 +75,8 @@ The `push!` function sends an external stimulus to the agent representing the ne
 ``` 
 
 As you can see, although changes to `x` cause two links to be
-re-evaluated (the `+` and the `*`), only one update of the reactives
-`z` and `zs` happens.
+re-evaluated (the `+` and the `*`), only one update of the reactive
+`zs` happens.
 
 This property is critical for example in case updates to a behavior
 cause side-effects.

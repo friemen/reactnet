@@ -3,12 +3,14 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Who exactly is "in error", an input?, a link?, an output
+;; - Is 'from' a useful combinator?
+;; - Where exactly must a error be set: in an input?, in the link?, in an output?
 ;; - Make use of completed?
-;; - Add a network modifying behavior like switch 
+;; - Add a network modifying behavior like 'switch' 
+;; - Make scheduler available in different ns, support at and at-fixed-rate 
 ;; - Limit max number of items in agents pending queue (back pressure)
-;; - Add pause! and resume!
-;; ... and many more ...
+;; - Add pause! and resume! for the network
+;; ... and some more ...
 
 
 ;; ---------------------------------------------------------------------------
@@ -310,6 +312,29 @@
 
 
 ;; ---------------------------------------------------------------------------
+;; Rough scheduler support
+
+(import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
+
+(defn- now
+  []
+  (System/currentTimeMillis))
+
+(defonce ^:private scheduler (ScheduledThreadPoolExecutor. 5))
+
+(defonce tasks (atom {}))
+
+(defn clean-tasks!
+  []
+  (swap! tasks (fn [task-map]
+                 (->> task-map
+                      (remove #(let [t (second %)]
+                                 (or (.isCancelled t) (.isDone t))))
+                      (into {})))))
+
+
+
+;; ---------------------------------------------------------------------------
 ;; Some combinators
 
 
@@ -402,13 +427,6 @@
     (add-link! n-agent (make-link "subscriber" callback-fn [reactive] []))
     reactive))
 
-(import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
-
-(defn- now
-  []
-  (System/currentTimeMillis))
-
-(defonce ^:private scheduler (ScheduledThreadPoolExecutor. 5))
 
 (defn rdelay
   [millis reactive]
@@ -416,9 +434,23 @@
     (derive-new eventstream
                 "delay"
                 (fn [reactive value timestamp inputs outputs]
-                  (.schedule scheduler #(push! (first outputs) value) millis TimeUnit/MILLISECONDS))
+                  (swap! tasks assoc reactive (.schedule scheduler #(push! (first outputs) value) millis TimeUnit/MILLISECONDS)))
                 [reactive])))
 
+
+(defn rsample
+  [n-agent millis f]
+  (let [new-r (eventstream n-agent "sample")
+        task (.scheduleAtFixedRate scheduler
+                                   #(push! new-r
+                                           (try (f)
+                                                (catch Exception ex
+                                                  (do (.printStackTrace ex)
+                                                      ;; TODO what to push in case f fails?
+                                                      ex))))
+                                   0 millis TimeUnit/MILLISECONDS)]
+    (swap! tasks assoc new-r task)
+    new-r))
 
 ;; ---------------------------------------------------------------------------
 ;; Example network
@@ -444,5 +476,10 @@
             (rdelay 3000)
             (subscribe (fn [value timestamp] (println value)))))
 
+#_ (->> (constantly "foo")
+     (rsample n 1000)
+     (subscribe (fn [value ts] (println value))))
+
 #_ (doseq [i (range 10)]
      (push! x i))
+
