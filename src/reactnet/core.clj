@@ -3,9 +3,10 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Handle exceptions -> error? state
+;; - Who exactly is "in error", an input?, a link?, an output
 ;; - Make use of completed?
-;; - Limit max number of items in pending queue (back pressure)
+;; - Add a network modifying behavior like switch 
+;; - Limit max number of items in agents pending queue (back pressure)
 ;; - Add pause! and resume!
 ;; ... and many more ...
 
@@ -18,14 +19,18 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
+  (get-value [r]
+    "Returns current value of this reactive.")
   (network-id [r]
     "Returns a string containing the fully qualified name of a network
   agent var.")
   (silent-set! [r value-timestamp-pair]
     "Sets a pair of value and timestamp, returns true if a
   propagation of the value should be triggered.")
-  (get-value [r]
-    "Returns current value of this reactive."))
+  (set-error! [r ex]
+    "Stores the exception in this reactive.")
+  (error [r]
+    "Returns the exception if in error state, nil otherwise."))
 
 
 ;; Link:
@@ -48,9 +53,8 @@
 ;; :-links            Links to remove from the network
 
 ;; Network:
-;; A map containing 
-;;  :command        A ref holding a promise whose delivery starts a propagation cycle
-;;  :pending-queue  A collection keeping external stimuli
+;; A map containing
+;;  :id             A string containing the fqn of the agent var
 ;;  :links          Collection of links
 ;;  :reactives      Set of reactives (derived)
 ;;  :level-map      Map {reactive -> topological-level} (derived)
@@ -98,8 +102,8 @@
 
 
 (defmacro defnetwork
-  [symbol & links]
-  `(def ~symbol (agent (make-network ~(str *ns* "/" symbol) ~(vec links))
+  [symbol]
+  `(def ~symbol (agent (make-network ~(str *ns* "/" symbol) [])
                        :error-handler ~(fn [_ ex] (.printStackTrace ex)))))
 
 (defn network-by-id
@@ -217,19 +221,25 @@
     (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
       #_ (println (->> links (map str-link) (s/join ", ")))
       (when-let [{:keys [f inputs outputs level]} (first links)]
-        (let [result-map (f reactive value timestamp inputs outputs)
+        (let [result-map (try (f reactive value timestamp inputs outputs)
+                              (catch Exception ex {:exception ex}))
               new-links (->> result-map :output-values
-                             (mapcat (fn [[reactive value]]
+                             (mapcat (fn [[r value]]
                                        ;; only changes to downstream reactives will be handled in this cycle
-                                       (if (< (level-map reactive) level)
-                                         (do (push! reactive value timestamp)
+                                       (if (< (level-map r) level)
+                                         (do (push! r value timestamp)
                                              ;; for those that are upstream
                                              ;; push! will add links to the pending queue
                                              nil)
-                                         (do (silent-set! reactive [value timestamp])
+                                         (do (silent-set! r [value timestamp])
                                              ;; these links will be returned for processing within the cycle
-                                             (links-map reactive)))))
+                                             (links-map r)))))
                              (remove nil?))]
+          ;; handle :exception value in result-map
+          (when-let [ex (:exception result-map)]
+            (.printStackTrace ex)
+            (doseq [r outputs] ;; are outputs the right addressee?
+              (set-error! r ex)))
           (recur (->> links rest (concat new-links) (sort-by :level (comparator <)) distinct))))))
   n)
 
@@ -248,20 +258,22 @@
 
 
 ;; ===========================================================================
-;; BELOW HERE STARTS EXPERIMENTAL REACTIVE API IMPL
+;; BELOW HERE STARTS EXPERIMENTAL NEW REACTOR API IMPL
 
 ;; ---------------------------------------------------------------------------
 ;; A trivial implementation of the IReactive protocol
 
-(defrecord React [n-id label a eventstream? completed? error?]
+(defrecord React [n-id label a eventstream? completed? error]
   IReactive
+  (get-value [this] (first @a))
   (network-id [this] n-id)
   (silent-set! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
       (println (str-react this) "<-" value)
       (reset! a [value timestamp])
       true))
-  (get-value [this] (first @a))
+  (set-error! [this ex] (reset! error ex))
+  (error [this] @error)
   clojure.lang.IDeref
   (deref [this] (first @a)))
 
@@ -277,7 +289,7 @@
              (atom [value (System/currentTimeMillis)])
              false
              (atom false)
-             (atom false))))
+             (atom nil))))
 
 (defn behavior?
   [r]
