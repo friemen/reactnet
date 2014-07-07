@@ -3,8 +3,8 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Introduce error and completed state in protocol
-;; - Create example combinators like filter, lift, delay, take
+;; - Handle exceptions -> error? state
+;; - Make use of completed?
 ;; - Limit max number of items in pending queue (back pressure)
 ;; - Add pause! and resume!
 ;; ... and many more ...
@@ -222,7 +222,7 @@
                              (mapcat (fn [[reactive value]]
                                        ;; only changes to downstream reactives will be handled in this cycle
                                        (if (< (level-map reactive) level)
-                                         (do (push! n reactive value timestamp)
+                                         (do (push! reactive value timestamp)
                                              ;; for those that are upstream
                                              ;; push! will add links to the pending queue
                                              nil)
@@ -235,10 +235,10 @@
 
 
 (defn push!
-  ([n-agent reactive value]
-     (push! n-agent reactive value (System/currentTimeMillis)))
-  ([n-agent reactive value timestamp]
-     (send-off n-agent propagate! (make-stimulus reactive value timestamp))
+  ([reactive value]
+     (push! reactive value (System/currentTimeMillis)))
+  ([reactive value timestamp]
+     (send-off (-> reactive network-id network-by-id) propagate! (make-stimulus reactive value timestamp))
      value))
 
 
@@ -276,8 +276,8 @@
              label
              (atom [value (System/currentTimeMillis)])
              false
-             false
-             false)))
+             (atom false)
+             (atom false))))
 
 (defn behavior?
   [r]
@@ -354,14 +354,58 @@
                                   {})})
               [reactive]))
 
+
+(defn rtake
+  [no reactive]
+  (let [c (atom no)]
+    (derive-new eventstream
+              "take"
+              (fn [reactive value timestamp inputs outputs]
+                {:output-values (if (> @c 0)
+                                  (do (swap! c dec)
+                                      (output-value-map value outputs))
+                                  {})})
+              [reactive])))
+
+
+(defn rbuffer
+  [no reactive]
+  (let [l (java.util.LinkedList.)]
+    (derive-new eventstream
+                "buffer"
+                (fn [reactive value timestamp inputs outputs]
+                  (when (>= (.size l) no)
+                    (.removeLast l))
+                  (.addFirst l value)
+                  {:output-values (output-value-map (vec l) outputs)})
+                [reactive])))
+
+
 (defn subscribe
   [f reactive]
   (let [n-id (network-id reactive)
         n-agent (network-by-id n-id)
         callback-fn (fn [reactive value timestamp inputs outputs]
-                      (f value timestamp))]
+                      (f (-> inputs first get-value) timestamp))]
     (add-link! n-agent (make-link "subscriber" callback-fn [reactive] []))
     reactive))
+
+(import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
+
+(defn- now
+  []
+  (System/currentTimeMillis))
+
+(defonce ^:private scheduler (ScheduledThreadPoolExecutor. 5))
+
+(defn rdelay
+  [millis reactive]
+  (let [n-agent (-> reactive network-id network-by-id)]
+    (derive-new eventstream
+                "delay"
+                (fn [reactive value timestamp inputs outputs]
+                  (.schedule scheduler #(push! (first outputs) value) millis TimeUnit/MILLISECONDS))
+                [reactive])))
 
 
 ;; ---------------------------------------------------------------------------
@@ -378,11 +422,15 @@
 (def e1 (eventstream n "e1"))
 (def e2 (eventstream n "e2"))
 
-(def f (->> e1 (rfilter (partial = "foo"))))
+(def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
 
 (subscribe (fn [value timestamp] (println value timestamp))
            (rmerge f e2))
 
+(def b (->> e1
+            (rbuffer 3)
+            (rdelay 3000)
+            (subscribe (fn [value timestamp] (println value)))))
 
 #_ (doseq [i (range 10)]
-     (push! n x i))
+     (push! x i))
