@@ -3,7 +3,13 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Is 'from' a useful combinator?
+;; - implement 'mapcat' by recursing into propagate!
+;; - async:
+#_ (rmap (async f) e1)
+#_ (rmap {:async f} e1)
+
+
+;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
 ;; - Make use of completed?
 ;; - Add a network modifying behavior like 'switch' 
@@ -180,7 +186,7 @@
         levels (fn levels [visited level reactive]
                  (if-not (visited reactive)
                    (cons [reactive level]
-                         (mapcat (partial levels (conj visited reactive) (inc level)) (rfm-with-root reactive)))))
+                         (mapcat (partial levels (conj visited reactive) (+ level 2)) (rfm-with-root reactive)))))
         level-map-wo-root (dissoc (->> (levels #{} 0 root)
                                        (reduce (fn [m [r l]]
                                                  (assoc m r (max (or (m r) 0) l)))
@@ -190,7 +196,8 @@
                                   (map (fn [l]
                                          [l (->> (:inputs l)
                                                  (map level-map-wo-root)
-                                                 (reduce max))]))
+                                                 (reduce max)
+                                                 inc)]))
                                   (into level-map-wo-root))]
     level-map-incl-links))
 
@@ -214,36 +221,58 @@
 (declare push!)
 
 
+(defn- handle-exception!
+  [{:keys [exception]} outputs]
+  (when exception
+    (.printStackTrace exception)
+    (doseq [r outputs] ;; are outputs the right addressee?
+      (set-error! r exception))))
+
+
 (defn- propagate!
-  "Executes one propagation cycle."
-  [{:keys [links-map level-map] :as n}
-   {:keys [reactive value timestamp]}]
-  {:pre [n]}
-  (when (silent-set! reactive [value timestamp])
-    (loop [links (->> (links-map reactive) (sort-by :level (comparator <)))]
-      #_ (println (->> links (map str-link) (s/join ", ")))
-      (when-let [{:keys [f inputs outputs level]} (first links)]
-        (let [result-map (try (f reactive value timestamp inputs outputs)
-                              (catch Exception ex {:exception ex}))
-              new-links (->> result-map :output-values
-                             (mapcat (fn [[r value]]
-                                       ;; only changes to downstream reactives will be handled in this cycle
-                                       (if (< (level-map r) level)
-                                         (do (push! r value timestamp)
-                                             ;; for those that are upstream
-                                             ;; push! will add links to the pending queue
-                                             nil)
-                                         (do (silent-set! r [value timestamp])
-                                             ;; these links will be returned for processing within the cycle
-                                             (links-map r)))))
-                             (remove nil?))]
-          ;; handle :exception value in result-map
-          (when-let [ex (:exception result-map)]
-            (.printStackTrace ex)
-            (doseq [r outputs] ;; are outputs the right addressee?
-              (set-error! r ex)))
-          (recur (->> links rest (concat new-links) (sort-by :level (comparator <)) distinct))))))
-  n)
+  [{:keys [links-map level-map] :as network}
+   {:keys [reactive value timestamp] :as stimulus}]
+  {:pre [network]}
+  (loop [updates [stimulus]] ;; An update is either a link or a stimulus
+    #_ (println  (->> updates (map #(if (:reactive %) (str-stimulus %) (str-link %))) (s/join ", ")))
+    (when-let [update (first updates)]
+      (let [new-updates 
+            (cond
+             ;; treat it as stimulus -> set value silently, take links as new updates
+             (:reactive update)
+             (let [{:keys [reactive
+                           value
+                           timestamp]} update]
+               (if (silent-set! reactive [value timestamp])
+                 (links-map reactive)))
+             
+             ;; treat it as link -> apply link function, take output-values as new updates
+             (:f update) 
+             (let [{:keys [f
+                           inputs
+                           outputs
+                           level]}  update
+                   result-map       (try (f reactive value timestamp inputs outputs)
+                                         (catch Exception ex {:exception ex}))
+                   ovms             (let [ov (:output-values result-map)]
+                                      (if-not (sequential? ov) [ov] ov))
+                   ovm-num-pairs    (map vector ovms (range))]
+               (handle-exception! result-map outputs)
+               (remove nil? (for [[ovm num] ovm-num-pairs, [r value] ovm]
+                              (let [r-level (level-map r)]
+                                (if (< r-level level)
+                                  (do (push! r value timestamp)
+                                      ;; for those that are upstream
+                                      ;; push! will add links to the agents queue
+                                      nil)
+                                  (assoc (make-stimulus r value timestamp)
+                                    :level r-level
+                                    :num num)))))))]
+        (recur (->> updates rest
+                    (concat new-updates)
+                    (sort-by :level (comparator <))
+                    distinct)))))
+  network)
 
 
 (defn push!
@@ -312,7 +341,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Rough scheduler support
+;; Simplistic scheduler support
 
 (import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
 
@@ -358,6 +387,15 @@
                   {:output-values (output-value-map result outputs)}))
               reactives))
 
+(defn rmapcat
+  [f & reactives]
+  (derive-new eventstream
+              "mapcat"
+              (fn [reactive value timestamp inputs outputs]
+                (let [result (->> inputs (map get-value) (apply f))]
+                  {:output-values (mapv #(output-value-map % outputs) result)}))
+              reactives))
+
 
 (defn rreduce
   [f initial-value & reactives]
@@ -386,9 +424,10 @@
   (derive-new eventstream
               "filter"
               (fn [reactive value timestamp inputs outputs]
-                {:output-values (if (pred value)
-                                  (output-value-map value outputs)
-                                  {})})
+                (let [v (-> inputs first get-value)]
+                  {:output-values (if (pred v)
+                                    (output-value-map v outputs)
+                                    {})}))
               [reactive]))
 
 
@@ -466,15 +505,17 @@
 (def e1 (eventstream n "e1"))
 (def e2 (eventstream n "e2"))
 
-(def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
+#_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
 
-(subscribe (fn [value timestamp] (println value timestamp))
+#_ (subscribe (fn [value timestamp] (println value timestamp))
            (rmerge f e2))
 
-(def b (->> e1
+#_ (def b (->> e1
             (rbuffer 3)
             (rdelay 3000)
             (subscribe (fn [value timestamp] (println value)))))
+
+(def c (->> e1 (rmapcat #(repeat 3 %)) (subscribe #(println %1 %2))))
 
 #_ (->> (constantly "foo")
      (rsample n 1000)
