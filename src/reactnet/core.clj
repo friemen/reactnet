@@ -3,20 +3,16 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - implement 'mapcat' by recursing into propagate!
-;; - async:
-#_ (rmap (async f) e1)
-#_ (rmap {:async f} e1)
-
-
+;; - How is rmap expected to work? Only eval when all inputs have a new value available?
+;; - Enable async execution with the following expression: (rmap (async f) e1)
 ;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
-;; - Make use of completed?
+;; - Make use of completed state
 ;; - Add a network modifying behavior like 'switch' 
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
-;; - Limit max number of items in agents pending queue (back pressure)
+;; - Limit max number of items in agents pending queue (provides back pressure)
 ;; - Add pause! and resume! for the network
-;; ... and some more ...
+
 
 
 ;; ---------------------------------------------------------------------------
@@ -147,6 +143,14 @@
     (println (str "Values\n" (s/join ", " (map str-react reactives))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
 
+(def debug? false)
+
+(defn dump
+  [& args]
+  (when debug?
+    (apply println args))
+  (first args))
+
 
 ;; ---------------------------------------------------------------------------
 ;; Getting information about the reactive graph
@@ -272,9 +276,9 @@
                       (concat pending-links)
                       (sort-by :level (comparator <))
                       distinct)
-           _ (println (apply str (repeat 60 \-)))
-           _ (println (->> links (map str-link) (s/join "\n")))
-           _ (println (apply str (repeat 60 \-)))
+           _ (dump (apply str (repeat 60 \-)))
+           _ (dump (->> links (map str-link) (s/join "\n")))
+           _ (dump (apply str (repeat 60 \-)))
            level (-> links first :level)
            rvsm (->> links
                      (filter #(= (:level %) level))
@@ -286,7 +290,7 @@
              (let [new-stimuli (->> non-empty-rvs
                                     (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
                                     seq)]
-               (println (->> new-stimuli (map str-stimulus) (s/join ", ")))
+               (dump (->> new-stimuli (map str-stimulus) (s/join ", ")))
                (propagate! network new-stimuli))
              (recur (map (fn [[r vs]] [r (rest vs)]) non-empty-rvs))))))
      network))
@@ -319,7 +323,7 @@
   (network-id [this] n-id)
   (silent-set! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
-      (println "SET" (str-react this) "<-" value)
+      (dump "SET" (str-react this) "<-" value)
       (reset! a [value timestamp])
       true))
   (set-error! [this ex] (reset! error ex))
@@ -558,5 +562,5 @@
 (def p (behavior n "p" nil))
 (def a (rmapcat :addresses p))
 (def pname (rmap :name p))
-(def pair (rmap vector a pname))
+(def pair (rmap vector pname a))
 (subscribe (fn [value] (println "OUTPUT" value)) pair)
