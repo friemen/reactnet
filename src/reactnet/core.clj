@@ -262,28 +262,34 @@
 
 
 (defn- propagate!
-  [{:keys [links-map level-map] :as network}
-   stimuli]
-  (let [links (->> stimuli
-                   (mapcat (partial set-reactive-value! links-map))
-                   (sort-by :level (comparator <))
-                   distinct)
-        _ (println (apply str (repeat 60 \-)))
-        _ (println (->> links (map str-link) (s/join "\n")))
-        _ (println (apply str (repeat 60 \-)))
-        rvsm (->> links
-                  (map (partial eval-link! level-map))
-                  (apply (partial merge-with concat)))]
-    (loop [rvss (seq rvsm)]
-      (let [non-empty-rvs (remove (comp empty? second) rvss)]
-        (when (seq non-empty-rvs)
-          (let [new-stimuli (->> non-empty-rvs
-                                 (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
-                                 seq)]
-            (println (->> new-stimuli (map str-stimulus) (s/join ", ")))
-            (propagate! network new-stimuli))
-          (recur (map (fn [[r vs]] [r (rest vs)]) non-empty-rvs))))))
-  network)
+  ([network stimuli]
+     (propagate! network [] stimuli))
+  ([{:keys [links-map level-map] :as network}
+    pending-links
+    stimuli]
+     (let [links (->> stimuli
+                      (mapcat (partial set-reactive-value! links-map))
+                      (concat pending-links)
+                      (sort-by :level (comparator <))
+                      distinct)
+           _ (println (apply str (repeat 60 \-)))
+           _ (println (->> links (map str-link) (s/join "\n")))
+           _ (println (apply str (repeat 60 \-)))
+           level (-> links first :level)
+           rvsm (->> links
+                     (filter #(= (:level %) level))
+                     (map (partial eval-link! level-map))
+                     (apply (partial merge-with concat)))]
+       (loop [rvss (seq rvsm)]
+         (let [non-empty-rvs (remove (comp empty? second) rvss)]
+           (when (seq non-empty-rvs)
+             (let [new-stimuli (->> non-empty-rvs
+                                    (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
+                                    seq)]
+               (println (->> new-stimuli (map str-stimulus) (s/join ", ")))
+               (propagate! network new-stimuli))
+             (recur (map (fn [[r vs]] [r (rest vs)]) non-empty-rvs))))))
+     network))
 
 
 (defn push!
@@ -330,7 +336,7 @@
   ([n-agent label value]
      (React. (-> n-agent deref :id)
              label
-             (atom [value (System/currentTimeMillis)])
+             (atom [value (now)])
              false
              (atom false)
              (atom nil))))
@@ -514,11 +520,6 @@
 (defnetwork n)
 
 (comment
-  (def x (behavior n "x" 0))
-  (def y (behavior n "y" 2))
-  (def x+y (rmap + x y))
-  (def zs (->> (rmap * x x+y)
-               (rreduce conj [])))
 
   (def e1 (eventstream n "e1"))
   (def e2 (eventstream n "e2")))
@@ -538,6 +539,13 @@
 #_ (->> (constantly "foo")
      (rsample n 1000)
      (subscribe (fn [value] (println value))))
+
+
+(def x (behavior n "x" 0))
+(def y (behavior n "y" 2))
+(def x+y (rmap + x y))
+(def zs (->> (rmap * x x+y)
+             (rreduce conj [])))
 
 #_ (doseq [i (range 10)]
      (push! x i))
