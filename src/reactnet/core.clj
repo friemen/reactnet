@@ -8,7 +8,8 @@
 ;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
 ;; - Make use of completed state
-;; - Add a network modifying behavior like 'switch' 
+;; - Implement 'concat' combinator, which requires the completed state
+;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
 ;; - Limit max number of items in agents pending queue (provides back pressure)
 ;; - Add pause! and resume! for the network
@@ -143,7 +144,7 @@
     (println (str "Values\n" (s/join ", " (map str-react reactives))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
 
-(def debug? false)
+(def debug? true)
 
 (defn dump
   [& args]
@@ -276,14 +277,15 @@
                       (concat pending-links)
                       (sort-by :level (comparator <))
                       distinct)
+           level (-> links first :level)
            _ (dump (apply str (repeat 60 \-)))
            _ (dump (->> links (map str-link) (s/join "\n")))
            _ (dump (apply str (repeat 60 \-)))
-           level (-> links first :level)
            rvsm (->> links
                      (filter #(= (:level %) level))
                      (map (partial eval-link! level-map))
-                     (apply (partial merge-with concat)))]
+                     (apply (partial merge-with concat)))
+           pending-links (remove #(= (:level %) level) links)]
        (loop [rvss (seq rvsm)]
          (let [non-empty-rvs (remove (comp empty? second) rvss)]
            (when (seq non-empty-rvs)
@@ -291,7 +293,7 @@
                                     (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
                                     seq)]
                (dump (->> new-stimuli (map str-stimulus) (s/join ", ")))
-               (propagate! network new-stimuli))
+               (propagate! network pending-links new-stimuli))
              (recur (map (fn [[r vs]] [r (rest vs)]) non-empty-rvs))))))
      network))
 
@@ -545,11 +547,13 @@
      (subscribe (fn [value] (println value))))
 
 
-(def x (behavior n "x" 0))
+(def x (behavior n "x" nil))
 (def y (behavior n "y" 2))
 (def x+y (rmap + x y))
 (def zs (->> (rmap * x x+y)
              (rreduce conj [])))
+
+#_ (->> x+y (rdelay 3000) (subscribe #(println %)))
 
 #_ (doseq [i (range 10)]
      (push! x i))
