@@ -88,9 +88,10 @@
    :level 0})
 
 (defn make-stimulus
-  [reactive value timestamp]
+  [reactive value level timestamp]
   {:reactive reactive
    :value value
+   :level level
    :timestamp timestamp})
 
 
@@ -129,14 +130,15 @@
 
 (defn str-link  
   [l]
-  (str "[" (s/join " " (map :label (:inputs l)))
+  (str "L" (:level l)
+       " [" (s/join " " (map :label (:inputs l)))
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
-       "] L" (:level l)))
+       "]"))
 
 (defn str-stimulus
   [s]
-  (str "Stimulus " (str-react (:reactive s)) " <- " (:value s)))
+  (str "L" (:level s) " " (str-react (:reactive s)) " <- " (:value s)))
 
 (defn pp
   [n-agent]
@@ -220,6 +222,10 @@
 
 (declare push!)
 
+(defn- now
+  []
+  (System/currentTimeMillis))
+
 
 (defn- handle-exception!
   [{:keys [exception]} outputs]
@@ -229,49 +235,54 @@
       (set-error! r exception))))
 
 
+(defn- set-reactive-value!
+  [links-map {:keys [reactive value timestamp]}]
+  (if (silent-set! reactive [value timestamp])
+    (links-map reactive)))
+
+
+(defn- eval-link!
+  [level-map {:keys [f inputs outputs level]}]
+  (let [result (try (f inputs outputs)
+                    (catch Exception ex {:exception ex}))
+        ;; make a vector with many {r->v} maps
+        rvms   (let [ov (:output-values result)]  
+                 (if-not (sequential? ov) [ov] ov))
+        ;; make a map {r->[vs]} containing a vector of result values for each reactive
+        rvsm   (->> rvms
+                    (mapcat seq)
+                    (reduce (fn [m [r v]]
+                              (if (< (level-map r) level)
+                                (do (push! r v (now))
+                                    m) ;; push values whose level is too low for current level
+                                (update-in m [r] (comp vec conj) v)))
+                            {}))]
+    (handle-exception! result outputs)
+    rvsm))
+
+
 (defn- propagate!
   [{:keys [links-map level-map] :as network}
-   {:keys [reactive value timestamp] :as stimulus}]
-  {:pre [network]}
-  (loop [updates [stimulus]] ;; An update is either a link or a stimulus
-    #_ (println  (->> updates (map #(if (:reactive %) (str-stimulus %) (str-link %))) (s/join ", ")))
-    (when-let [update (first updates)]
-      (let [new-updates 
-            (cond
-             ;; treat it as stimulus -> set value silently, take links as new updates
-             (:reactive update)
-             (let [{:keys [reactive
-                           value
-                           timestamp]} update]
-               (if (silent-set! reactive [value timestamp])
-                 (links-map reactive)))
-             
-             ;; treat it as link -> apply link function, take output-values as new updates
-             (:f update) 
-             (let [{:keys [f
-                           inputs
-                           outputs
-                           level]}  update
-                   result-map       (try (f reactive value timestamp inputs outputs)
-                                         (catch Exception ex {:exception ex}))
-                   ovms             (let [ov (:output-values result-map)]
-                                      (if-not (sequential? ov) [ov] ov))
-                   ovm-num-pairs    (map vector ovms (range))]
-               (handle-exception! result-map outputs)
-               (remove nil? (for [[ovm num] ovm-num-pairs, [r value] ovm]
-                              (let [r-level (level-map r)]
-                                (if (< r-level level)
-                                  (do (push! r value timestamp)
-                                      ;; for those that are upstream
-                                      ;; push! will add links to the agents queue
-                                      nil)
-                                  (assoc (make-stimulus r value timestamp)
-                                    :level r-level
-                                    :num num)))))))]
-        (recur (->> updates rest
-                    (concat new-updates)
-                    (sort-by :level (comparator <))
-                    distinct)))))
+   stimuli]
+  (let [links (->> stimuli
+                   (mapcat (partial set-reactive-value! links-map))
+                   (sort-by :level (comparator <))
+                   distinct)
+        _ (println (apply str (repeat 60 \-)))
+        _ (println (->> links (map str-link) (s/join "\n")))
+        _ (println (apply str (repeat 60 \-)))
+        rvsm (->> links
+                  (map (partial eval-link! level-map))
+                  (apply (partial merge-with concat)))]
+    (loop [rvss (seq rvsm)]
+      (let [non-empty-rvs (remove (comp empty? second) rvss)]
+        (when (seq non-empty-rvs)
+          (let [new-stimuli (->> non-empty-rvs
+                                 (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
+                                 seq)]
+            (println (->> new-stimuli (map str-stimulus) (s/join ", ")))
+            (propagate! network new-stimuli))
+          (recur (map (fn [[r vs]] [r (rest vs)]) non-empty-rvs))))))
   network)
 
 
@@ -279,7 +290,9 @@
   ([reactive value]
      (push! reactive value (System/currentTimeMillis)))
   ([reactive value timestamp]
-     (send-off (-> reactive network-id network-by-id) propagate! (make-stimulus reactive value timestamp))
+     (send-off (-> reactive network-id network-by-id)
+               propagate!
+               [(make-stimulus reactive value 0 timestamp)])
      value))
 
 
@@ -300,7 +313,7 @@
   (network-id [this] n-id)
   (silent-set! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
-      (println (str-react this) "<-" value)
+      (println "SET" (str-react this) "<-" value)
       (reset! a [value timestamp])
       true))
   (set-error! [this ex] (reset! error ex))
@@ -345,9 +358,6 @@
 
 (import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
 
-(defn- now
-  []
-  (System/currentTimeMillis))
 
 (defonce ^:private scheduler (ScheduledThreadPoolExecutor. 5))
 
@@ -362,6 +372,19 @@
                       (into {})))))
 
 
+(defn rsample
+  [n-agent millis f]
+  (let [new-r (eventstream n-agent "sample")
+        task (.scheduleAtFixedRate scheduler
+                                   #(push! new-r
+                                           (try (f)
+                                                (catch Exception ex
+                                                  (do (.printStackTrace ex)
+                                                      ;; TODO what to push in case f fails?
+                                                      ex))))
+                                   0 millis TimeUnit/MILLISECONDS)]
+    (swap! tasks assoc new-r task)
+    new-r))
 
 ;; ---------------------------------------------------------------------------
 ;; Some combinators
@@ -382,7 +405,7 @@
   [f & reactives]
   (derive-new eventstream
               "map"
-              (fn [reactive value timestamp inputs outputs]
+              (fn [inputs outputs]
                 (let [result (->> inputs (map get-value) (apply f))]
                   {:output-values (output-value-map result outputs)}))
               reactives))
@@ -391,7 +414,7 @@
   [f & reactives]
   (derive-new eventstream
               "mapcat"
-              (fn [reactive value timestamp inputs outputs]
+              (fn [inputs outputs]
                 (let [result (->> inputs (map get-value) (apply f))]
                   {:output-values (mapv #(output-value-map % outputs) result)}))
               reactives))
@@ -401,7 +424,7 @@
   [f initial-value & reactives]
   (derive-new behavior
               "reduce"
-              (fn [reactive value timestamp inputs outputs]
+              (fn [inputs outputs]
                 {:pre [(= 1 (count outputs))]}
                 (let [accu-reactive (first outputs)
                       accu-value    (or (get-value accu-reactive) initial-value)
@@ -412,18 +435,20 @@
 
 (defn rmerge
   [& reactives]
-  (derive-new eventstream
-              "merge"
-              (fn [reactive value timestamp inputs outputs]
-                {:output-values (output-value-map value outputs)})
-              reactives))
+  (let [n-agent (-> reactives first network-id network-by-id)
+        new-r (eventstream n-agent "merge")]
+    (doseq [r reactives]
+      (add-link! n-agent (make-link "merge" (fn [inputs outputs]
+                                              (-> inputs first get-value))
+                                    [r] [new-r])))
+    new-r))
 
 
 (defn rfilter
   [pred reactive]
   (derive-new eventstream
               "filter"
-              (fn [reactive value timestamp inputs outputs]
+              (fn [inputs outputs]
                 (let [v (-> inputs first get-value)]
                   {:output-values (if (pred v)
                                     (output-value-map v outputs)
@@ -436,11 +461,12 @@
   (let [c (atom no)]
     (derive-new eventstream
               "take"
-              (fn [reactive value timestamp inputs outputs]
-                {:output-values (if (> @c 0)
-                                  (do (swap! c dec)
-                                      (output-value-map value outputs))
-                                  {})})
+              (fn [inputs outputs]
+                (let [v (-> inputs first get-value)]
+                  {:output-values (if (> @c 0)
+                                    (do (swap! c dec)
+                                        (output-value-map v outputs))
+                                    {})}))
               [reactive])))
 
 
@@ -449,11 +475,12 @@
   (let [l (java.util.LinkedList.)]
     (derive-new eventstream
                 "buffer"
-                (fn [reactive value timestamp inputs outputs]
-                  (when (>= (.size l) no)
-                    (.removeLast l))
-                  (.addFirst l value)
-                  {:output-values (output-value-map (vec l) outputs)})
+                (fn [inputs outputs]
+                  (let [v (-> inputs first get-value)]
+                    (when (>= (.size l) no)
+                      (.removeLast l))
+                    (.addFirst l v)
+                    {:output-values (output-value-map (vec l) outputs)}))
                 [reactive])))
 
 
@@ -461,8 +488,8 @@
   [f reactive]
   (let [n-id (network-id reactive)
         n-agent (network-by-id n-id)
-        callback-fn (fn [reactive value timestamp inputs outputs]
-                      (f (-> inputs first get-value) timestamp))]
+        callback-fn (fn [inputs outputs]
+                      (f (-> inputs first get-value)))]
     (add-link! n-agent (make-link "subscriber" callback-fn [reactive] []))
     reactive))
 
@@ -472,55 +499,56 @@
   (let [n-agent (-> reactive network-id network-by-id)]
     (derive-new eventstream
                 "delay"
-                (fn [reactive value timestamp inputs outputs]
-                  (swap! tasks assoc reactive (.schedule scheduler #(push! (first outputs) value) millis TimeUnit/MILLISECONDS)))
+                (fn [inputs outputs]
+                  (let [output (first outputs)
+                        v (-> inputs first get-value)]
+                    (swap! tasks assoc output
+                           (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
                 [reactive])))
 
-
-(defn rsample
-  [n-agent millis f]
-  (let [new-r (eventstream n-agent "sample")
-        task (.scheduleAtFixedRate scheduler
-                                   #(push! new-r
-                                           (try (f)
-                                                (catch Exception ex
-                                                  (do (.printStackTrace ex)
-                                                      ;; TODO what to push in case f fails?
-                                                      ex))))
-                                   0 millis TimeUnit/MILLISECONDS)]
-    (swap! tasks assoc new-r task)
-    new-r))
 
 ;; ---------------------------------------------------------------------------
 ;; Example network
 
 
 (defnetwork n)
-(def x (behavior n "x" 0))
-(def y (behavior n "y" 2))
-(def x+y (rmap + x y))
-(def zs (->> (rmap * x x+y)
-             (rreduce conj [])))
 
-(def e1 (eventstream n "e1"))
-(def e2 (eventstream n "e2"))
+(comment
+  (def x (behavior n "x" 0))
+  (def y (behavior n "y" 2))
+  (def x+y (rmap + x y))
+  (def zs (->> (rmap * x x+y)
+               (rreduce conj [])))
+
+  (def e1 (eventstream n "e1"))
+  (def e2 (eventstream n "e2")))
 
 #_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
 
-#_ (subscribe (fn [value timestamp] (println value timestamp))
+#_ (subscribe (fn [value] (println value))
            (rmerge f e2))
 
 #_ (def b (->> e1
             (rbuffer 3)
             (rdelay 3000)
-            (subscribe (fn [value timestamp] (println value)))))
+            (subscribe (fn [value] (println value)))))
 
-(def c (->> e1 (rmapcat #(repeat 3 %)) (subscribe #(println %1 %2))))
+#_ (def c (->> e1 (rmapcat #(repeat 3 %)) (subscribe #(println %))))
 
 #_ (->> (constantly "foo")
      (rsample n 1000)
-     (subscribe (fn [value ts] (println value))))
+     (subscribe (fn [value] (println value))))
 
 #_ (doseq [i (range 10)]
      (push! x i))
 
+
+(def data {:name "bar" :addresses [{:street "1"}
+                                   {:street "2"}
+                                   {:street "3"}]})
+
+(def p (behavior n "p" nil))
+(def a (rmapcat :addresses p))
+(def pname (rmap :name p))
+(def pair (rmap vector a pname))
+(subscribe (fn [value] (println "OUTPUT" value)) pair)
