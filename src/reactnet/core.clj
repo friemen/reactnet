@@ -3,9 +3,9 @@
             [clojure.string :as s]))
 
 ;; TODOs
+;; - Create unit tests
 ;; - How is rmap expected to work? Only eval when all inputs have a new value available?
 ;; - Handle the initial state of the network
-;; - Enable async execution with the following expression: (rmap (async f) e1)
 ;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
 ;; - Make use of completed state
@@ -41,22 +41,22 @@
 
 ;; Link:
 ;; A map that combines m input reactives, n output reactives and a link function f.
-;;  :label    Label for pretty printing.
-;;  :inputs   Input reactives.
-;;  :outputs  Output reactives.
-;;  :f        A link function with the arity of the number of input reactives.
-;;  :level    The level within the reactive network (max level of all input reactives).
+;;  :label    Label for pretty printing
+;;  :inputs   Input reactives
+;;  :outputs  Output reactives
+;;  :f        A link function (see below)
+;;  :level    The level within the reactive network
+;;            (max level of all input reactives + 1)
 
 ;; Link function:
-;; A function taking 4 args (reactive which caused the evaluation, it's value,
-;; the timestamp, input reactives, output reactives) which returns a Result map.
+;; A function takes 2 vectors (input reactives, output reactives) and returns
+;; a Result map (see below).
 
 ;; Result:
 ;; A map with the following entries
 ;;  :output-values    A map {reactive->value} containing the values for
-;;                    each output reactive.
-;; :+links            Links to add to the network
-;; :-links            Links to remove from the network
+;;                    each output reactive, or a vector containing such maps.
+;; :exception         Exception, or nil if output-values is valid
 
 ;; Network:
 ;; A map containing
@@ -76,6 +76,12 @@
 ;; ---------------------------------------------------------------------------
 ;; Factories
 
+(declare push!)
+
+(defn- now
+  []
+  (System/currentTimeMillis))
+
 
 (defn make-link
   [label f inputs outputs]
@@ -85,6 +91,7 @@
    :outputs outputs
    :level 0})
 
+
 (defn make-stimulus
   [reactive value level timestamp]
   {:reactive reactive
@@ -93,9 +100,56 @@
    :timestamp timestamp})
 
 
+(defn safely-apply
+  [f vs]
+  (try [(apply f vs) nil]
+       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
+
+
+(defn make-async-link-fn
+  [f result-fn]
+  (fn [inputs outputs]
+    (future (let [[result ex] (safely-apply f (map get-value inputs))
+                  result-map (result-fn result ex inputs outputs)]
+              (doseq [[r v] (:output-values result-map)]
+                (push! r v))))
+    {:output-values {}}))
+
+
+(defn make-sync-link-fn
+  [f result-fn]
+  (fn [inputs outputs]
+    (let [[result ex] (safely-apply f (map get-value inputs))]
+      (result-fn result ex inputs outputs))))
+
+
+(defn async
+  [f]
+  {:async f})
+
+
+(defn unpack-fn
+  [fn-or-map]
+  (if-let [f (:async fn-or-map)]
+    [make-async-link-fn f]
+    [make-sync-link-fn fn-or-map]))
+
+
+(defn make-output-value-map
+  [value outputs]
+  (reduce (fn [m r] (assoc m r value)) {} outputs))
+
+
+(defn make-result-map
+  [value ex inputs outputs]
+  {:output-values (if-not ex (make-output-value-map value outputs))
+   :exception ex})
+
+
 (declare reactives-from-links
          reactive-links-map
          reactive-level-map)
+
 
 (defn make-network
   [id links]
@@ -226,13 +280,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Propagation within network
 
-(declare push!)
-
-(defn- now
-  []
-  (System/currentTimeMillis))
-
-
 (defn- handle-exception!
   [{:keys [exception]} outputs]
   (when exception
@@ -307,11 +354,6 @@
                propagate!
                [(make-stimulus reactive value 0 timestamp)])
      value))
-
-
-(defn output-value-map
-  [value outputs]
-  (->> outputs (reduce (fn [m r] (assoc m r value)) {})))
 
 
 ;; ===========================================================================
@@ -390,6 +432,9 @@
     (.cancel f true)))
 
 
+;; ---------------------------------------------------------------------------
+;; More constructors of reactives
+
 (defn rsample
   [n-agent millis f]
   (let [new-r (eventstream n-agent "sample")
@@ -404,51 +449,52 @@
     (swap! tasks assoc new-r task)
     new-r))
 
+
 ;; ---------------------------------------------------------------------------
 ;; Some combinators
 
 
 (defn derive-new
-  [factory-fn label f inputs]
+  [factory-fn label link-fn inputs]
   {:pre [(seq inputs)]}
   (let [n-id (network-id (first inputs))
         n-agent (network-by-id n-id)
         new-r (factory-fn n-agent label)]
-    (add-link! n-agent (make-link label f inputs [new-r]))
+    (add-link! n-agent (make-link label link-fn inputs [new-r]))
     new-r))
 
 
 
 (defn rmap
   [f & reactives]
-  (derive-new eventstream
-              "map"
-              (fn [inputs outputs]
-                (let [result (->> inputs (map get-value) (apply f))]
-                  {:output-values (output-value-map result outputs)}))
-              reactives))
+  (let [[make-link-fn f] (unpack-fn f)]
+    (derive-new eventstream
+                "map"
+                (make-link-fn f make-result-map)
+                reactives)))
+
 
 (defn rmapcat
   [f & reactives]
-  (derive-new eventstream
-              "mapcat"
-              (fn [inputs outputs]
-                (let [result (->> inputs (map get-value) (apply f))]
-                  {:output-values (mapv #(output-value-map % outputs) result)}))
-              reactives))
+  (let [[make-link-fn f] (unpack-fn f)]
+    (derive-new eventstream
+                "mapcat"
+                (make-link-fn f (fn [result ex inputs outputs]
+                                  {:output-values (if-not ex (mapv #(make-output-value-map % outputs) result))
+                                   :exception ex}))
+                reactives)))
 
 
 (defn rreduce
   [f initial-value & reactives]
-  (derive-new behavior
-              "reduce"
-              (fn [inputs outputs]
-                {:pre [(= 1 (count outputs))]}
-                (let [accu-reactive (first outputs)
-                      accu-value    (or (get-value accu-reactive) initial-value)
-                      result (->> inputs (map get-value) (cons accu-value) (apply f))]
-                  {:output-values {accu-reactive result}}))
-              reactives))
+  (let [[make-link-fn f] (unpack-fn f)
+        accu (atom initial-value)]
+    (derive-new behavior
+                "reduce"
+                (make-link-fn (fn [& vs]
+                                (swap! accu #(apply (partial f %) vs)))
+                              make-result-map)
+                reactives)))
 
 
 (defn rmerge
@@ -456,22 +502,24 @@
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r (eventstream n-agent "merge")]
     (doseq [r reactives]
-      (add-link! n-agent (make-link "merge" (fn [inputs outputs]
-                                              (-> inputs first get-value))
+      (add-link! n-agent (make-link "merge"
+                                    (make-sync-link-fn identity make-result-map)
                                     [r] [new-r])))
     new-r))
 
 
 (defn rfilter
   [pred reactive]
-  (derive-new eventstream
-              "filter"
-              (fn [inputs outputs]
-                (let [v (-> inputs first get-value)]
-                  {:output-values (if (pred v)
-                                    (output-value-map v outputs)
-                                    {})}))
-              [reactive]))
+  (let [[make-link-fn f] (unpack-fn pred)]
+    (derive-new eventstream
+                "filter"
+                (make-link-fn f (fn [result ex inputs outputs]
+                                  (if result
+                                    (make-result-map (-> inputs first get-value)
+                                                     ex
+                                                     inputs
+                                                     outputs))))
+                [reactive])))
 
 
 (defn rtake
@@ -481,10 +529,10 @@
               "take"
               (fn [inputs outputs]
                 (let [v (-> inputs first get-value)]
-                  {:output-values (if (> @c 0)
-                                    (do (swap! c dec)
-                                        (output-value-map v outputs))
-                                    {})}))
+                  (if (> @c 0)
+                    (do (swap! c dec)
+                        (make-result-map v nil inputs outputs))
+                    {})))
               [reactive])))
 
 
@@ -498,17 +546,16 @@
                     (when (>= (.size l) no)
                       (.removeLast l))
                     (.addFirst l v)
-                    {:output-values (output-value-map (vec l) outputs)}))
+                    (make-result-map (vec l) nil inputs outputs)))
                 [reactive])))
 
 
 (defn subscribe
   [f reactive]
-  (let [n-id (network-id reactive)
-        n-agent (network-by-id n-id)
-        callback-fn (fn [inputs outputs]
-                      (f (-> inputs first get-value)))]
-    (add-link! n-agent (make-link "subscriber" callback-fn [reactive] []))
+  (let [[make-link-fn f] (unpack-fn f)
+        n-id (network-id reactive)
+        n-agent (network-by-id n-id)]
+    (add-link! n-agent (make-link "subscriber" (make-link-fn f (constantly nil)) [reactive] []))
     reactive))
 
 
@@ -567,21 +614,23 @@
     new-r))
 
 
+
+
 ;; ---------------------------------------------------------------------------
 ;; Example network
 
 
 (defnetwork n)
 
-(comment
+(def e1 (eventstream n "e1"))
+(def e2 (eventstream n "e2"))
 
-  (def e1 (eventstream n "e1"))
-  (def e2 (eventstream n "e2")))
-
-#_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
-
-#_ (subscribe (fn [value] (println value))
+(def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
+(subscribe #(println %)
            (rmerge f e2))
+
+
+
 
 #_ (def b (->> e1
             (rbuffer 3)
@@ -615,4 +664,4 @@
 (def a (rmapcat :addresses p))
 (def pname (rmap :name p))
 (def pair (rmap vector pname a))
-(subscribe (fn [value] (println "OUTPUT" value)) pair)
+(subscribe (async #(println "OUTPUT" %)) pair)
