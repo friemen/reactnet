@@ -4,6 +4,7 @@
 
 ;; TODOs
 ;; - How is rmap expected to work? Only eval when all inputs have a new value available?
+;; - Handle the initial state of the network
 ;; - Enable async execution with the following expression: (rmap (async f) e1)
 ;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
@@ -357,8 +358,8 @@
           label
           (atom [nil (System/currentTimeMillis)])
           true
-          false
-          false))
+          (atom false)
+          (atom nil)))
 
 (defn eventstream?
   [r]
@@ -382,6 +383,11 @@
                       (remove #(let [t (second %)]
                                  (or (.isCancelled t) (.isDone t))))
                       (into {})))))
+
+(defn cancel-tasks!
+  []
+  (doseq [[r f] @tasks]
+    (.cancel f true)))
 
 
 (defn rsample
@@ -517,6 +523,48 @@
                     (swap! tasks assoc output
                            (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
                 [reactive])))
+
+
+(defn make-queue
+  [max-size]
+  {:queue (clojure.lang.PersistentQueue/EMPTY)
+   :dequeued []
+   :max-size max-size})
+
+
+(defn- enqueue [{:keys [queue dequeued max-size] :as q} v]
+  (assoc q :queue
+         (conj (if (>= (count queue) max-size)
+                 (pop queue)
+                 queue)
+               v)))
+
+
+(defn- dequeue [{:keys [queue dequeued] :as q}]
+  (if-let [v (first queue)]
+    (assoc q
+      :queue (pop queue)
+      :dequeued [v])
+    (assoc q
+      :dequeued [])))
+
+
+(defn rthrottle
+  [millis max-queue-size reactive]
+  (let [n-agent (-> reactive network-id network-by-id)
+        queue-atom (atom (make-queue max-queue-size))
+        new-r (derive-new eventstream
+                          "throttle"
+                          (fn [inputs _]
+                            (let [v (-> inputs first get-value)]
+                              (swap! queue-atom enqueue v)))
+                          [reactive])]
+    (swap! tasks assoc new-r
+           (.scheduleAtFixedRate scheduler
+                                 #(let [vs (:dequeued (swap! queue-atom dequeue))]
+                                    (when-not (empty? vs) (push! new-r (first vs))))
+                                 millis millis TimeUnit/MILLISECONDS))
+    new-r))
 
 
 ;; ---------------------------------------------------------------------------
