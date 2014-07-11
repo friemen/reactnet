@@ -68,12 +68,6 @@
 ;;  :links-map      Map {reactive -> Seq of links} (derived)
 ;;  :values         Map of pending Reactive Values (see below)
 
-;; External Stimulus:
-;; A map containing
-;;  :reactive     The reactive whose value is to be set
-;;  :value        The value to set
-;;  :timestamp    The timestamp in ms when the value was pushed
-
 ;; Reactive Values:
 ;; A map {reactive -> [[value timestamp]*]} containing for each
 ;; reactive a vector of value-timestamp-pairs.
@@ -96,14 +90,6 @@
    :inputs inputs
    :outputs outputs
    :level 0})
-
-
-(defn make-stimulus
-  [reactive value level timestamp]
-  {:reactive reactive
-   :value value
-   :level level ;; TODO is this needed?
-   :timestamp timestamp})
 
 
 (defn safely-apply
@@ -194,9 +180,6 @@
        (s/join " " (mapv :label (:outputs l)))
        "]"))
 
-(defn str-stimulus
-  [s]
-  (str "L" (:level s) " " (str-react (:reactive s)) " <- " (:value s)))
 
 (defn pp
   [n-agent]
@@ -212,6 +195,13 @@
   (when debug?
     (apply println args))
   (first args))
+
+
+(defn dump-links
+  [links]
+  (dump (apply str (repeat 60 \-)))
+  (dump (->> links (map str-link) (s/join "\n")))
+  (dump (apply str (repeat 60 \-))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -298,12 +288,23 @@
       (set-error! r exception))))
 
 
-(defn- set-reactive-value!
+(defn- update-reactive-value!
   "Updates a reactive's value and returns the links that have the
   reactive as one of their inputs."
-  [links-map {:keys [reactive value timestamp]}]
-  (if (silent-set! reactive [value timestamp])
+  [links-map [reactive value-timestamp]]
+  (if (silent-set! reactive value-timestamp)
     (links-map reactive)))
+
+
+(defn- update-reactive-values!
+  "Updates all reactives, collects links to be evaluated afterwards,
+  and returns a sorted distinct seq of links."
+  [links-map pending-links reactive-values]
+  (->> reactive-values
+       (mapcat (partial update-reactive-value! links-map))
+       (concat pending-links)
+       (sort-by :level (comparator <))
+       distinct))
 
 
 (defn- eval-link!
@@ -337,7 +338,6 @@
 (defn- eval-links!
   "From a seq of links, sorted ascending by level, evaluates all links
   in the same level as the first. 
-
   Returns a pair of reactive values and a seq of unevaluated links."
   [level-map links]
   (let [level          (-> links first :level)
@@ -348,54 +348,59 @@
                             (apply (partial merge-with concat)))]
     [rvsm pending-links]))
 
-(defn- drop-topmost-values
-  [rvss]
-  (map (fn [[r vs]] [r (rest vs)]) rvss))
 
+(defn- topmost-values
+  "Returns a seq of pairs [reactive -> [value timestamp]] for all
+  reactives that have a value left."
+  [reactive-values]
+  (->> reactive-values
+       (remove (comp empty? second))
+       (map (fn [[r vs]] [r (first vs)]))))
+
+
+(defn- without-topmost-values
+  "Returns a seq of pairs [reactive [[value timestamp]+]] where the
+  first value-timestamp pair for each reactive is dropped."
+  [reactive-values]
+  (->> reactive-values
+       (remove (comp empty? second))
+       (map (fn [[r vs]] [r (vec (rest vs))]))))
 
 
 (defn- propagate!
-  ([network stimuli]
-     (propagate! network [] stimuli))
+  "Executes one propagation cycle, returns the network."
+  ([network reactive-values]
+     (propagate! network [] reactive-values))
   ([{:keys [links-map level-map] :as network}
     pending-links
-    stimuli]
-     (let [links (->> stimuli
-                      (mapcat (partial set-reactive-value! links-map))
-                      (concat pending-links)
-                      (sort-by :level (comparator <))
-                      distinct)
+    reactive-values]
+     (let [links (update-reactive-values! links-map
+                                          pending-links
+                                          reactive-values)
            
-           _ (dump (apply str (repeat 60 \-)))
-           _ (dump (->> links (map str-link) (s/join "\n")))
-           _ (dump (apply str (repeat 60 \-)))
-
-           ;; rvsm is a map {reactive -> [[value timestamp]*]}
-           ;; containing outputs across all evaluated links
+           _ (dump-links links)
            [rvsm pending-links] (eval-links! level-map links)]
-
+       ;; rvsm is a map {reactive -> [[value timestamp]*]}
+       ;; containing outputs across all evaluated links
        (loop [rvss (seq rvsm)]
-         (let [non-empty-rvs (remove (comp empty? second) rvss)]
-           (when (seq non-empty-rvs)
-             ;; non-empty-rvs is a seq of pairs [reactive [[value timestamp]+]]
-             (let [new-stimuli (->> non-empty-rvs
-                                    (map (fn [[r vs]]
-                                           (let [[v timestamp] (first vs)]
-                                             (make-stimulus r v (level-map r) timestamp))))
-                                    seq)]
-               (dump (->> new-stimuli (map str-stimulus) (s/join ", ")))
-               (propagate! network pending-links new-stimuli))
-             (recur (drop-topmost-values non-empty-rvs))))))
+         (let [top-rvs (topmost-values rvss)]
+           ;; top-rvs is a seq of pairs [reactive [[value timestamp]+]]
+           (when (seq top-rvs)
+             (propagate! network pending-links top-rvs)
+             (recur (without-topmost-values rvss))))))
      network))
 
 
+
 (defn push!
+  "Starts asynchronously a propagation cycle, where initially the
+  reactive is updated with the given value. Returns the value."
   ([reactive value]
      (push! reactive value (System/currentTimeMillis)))
   ([reactive value timestamp]
      (send-off (-> reactive network-id network-by-id)
                propagate!
-               [(make-stimulus reactive value 0 timestamp)])
+               {reactive [value timestamp]})
      value))
 
 
@@ -708,3 +713,6 @@
 (def pname (rmap :name p))
 (def pair (rmap vector pname a))
 (subscribe (async #(println "OUTPUT" %)) pair)
+
+
+
