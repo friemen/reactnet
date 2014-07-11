@@ -30,6 +30,8 @@
   agent var.")
   (get-value [r]
     "Returns current value of this reactive.")
+  (get-value! [r]
+    "Returns current value of this reactive and may turn the state into unavailable.")
   (available? [r]
     "Returns true if a value is available.")
   (mark-available! [r]
@@ -72,7 +74,7 @@
 ;;  :reactives      Set of reactives (derived)
 ;;  :level-map      Map {reactive -> topological-level} (derived)
 ;;  :links-map      Map {reactive -> Seq of links} (derived)
-;;  :values         Map of pending Reactive Values (see below)
+;;  :values         Seq of pending values in the form [reactive [value timestamp]]
 
 ;; Reactive Values:
 ;; A map {reactive -> [[value timestamp]*]} containing for each
@@ -107,7 +109,7 @@
 (defn make-async-link-fn
   [f result-fn]
   (fn [inputs outputs]
-    (future (let [[result ex] (safely-apply f (map get-value inputs))
+    (future (let [[result ex] (safely-apply f (map get-value! inputs))
                   result-map (result-fn result ex inputs outputs)]
               (doseq [[r v] (:output-values result-map)]
                 (push! r v))))
@@ -117,7 +119,7 @@
 (defn make-sync-link-fn
   [f result-fn]
   (fn [inputs outputs]
-    (let [[result ex] (safely-apply f (map get-value inputs))]
+    (let [[result ex] (safely-apply f (map get-value! inputs))]
       (result-fn result ex inputs outputs))))
 
 
@@ -185,13 +187,18 @@
        " [" (s/join " " (map :label (:inputs l)))
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
-       "]"))
+       "] " (if (every? available? (:inputs l))
+              "WILL EVALUATE" "incomplete inputs")))
 
 
 (defn str-rvalue
   [[r [v timestamp]]]
   (str (:label r) ": " v))
 
+
+(defn str-rvalues
+  [[r vs]]
+  (str (:label r) ": [" (->> vs (map first) (s/join ", ")) "]"))
 
 (defn pp
   [n-agent]
@@ -304,11 +311,7 @@
   "Updates a reactive's value and returns the links that have the
   reactive as one of their inputs."
   [links-map [reactive value-timestamp]]
-  (if (silent-set! reactive value-timestamp)
-          [nil (links-map reactive)]
-          [nil nil])
-  
-  #_ (if (updateable? reactive)
+  (if (updateable? reactive)
     (do (mark-available! reactive)
         (if (silent-set! reactive value-timestamp)
           [nil (links-map reactive)]
@@ -337,23 +340,23 @@
   network for processing in the next cycle."
   [level-map {:keys [f inputs outputs level]}]
   (let [timestamp (now)
-        result (try (f inputs outputs)
-                    (catch Exception ex {:exception ex}))
+        result    (try (f inputs outputs)
+                       (catch Exception ex {:exception ex}))
         ;; make a vector [{reactives -> value}*] with many maps
-        rvms   (let [ov (:output-values result)]  
-                 (if-not (sequential? ov) [ov] ov))
+        rvms      (let [ov (:output-values result)]  
+                    (if-not (sequential? ov) [ov] ov))
         ;; make a Reactive Values map {reactive -> [[value timestamp]*]}
         ;; containing for each reactive a vector of result value / timestamp pairs
-        rvsm   (->> rvms
-                    (mapcat seq)
-                    (reduce (fn [m [r v]]
-                              (if (< (level-map r) level)
-                                ;; push values whose level is lower
-                                ;; than current level into next cycle
-                                (do (push! r v timestamp)
-                                    m)
-                                (update-in m [r] (comp vec conj) [v timestamp])))
-                            {}))]
+        rvsm      (->> rvms
+                       (mapcat seq)
+                       (reduce (fn [m [r v]]
+                                 (if (< (level-map r) level)
+                                   ;; push values whose level is lower
+                                   ;; than current level into next cycle
+                                   (do (push! r v timestamp)
+                                       m)
+                                   (update-in m [r] (comp vec conj) [v timestamp])))
+                               {}))]
     (handle-exception! result outputs)
     rvsm))
 
@@ -363,12 +366,13 @@
   in the same level as the first. 
   Returns a pair of reactive values and a seq of unevaluated links."
   [level-map links]
-  (let [level          (-> links first :level)
-        pending-links  (remove #(= (:level %) level) links)
-        rvsm           (->> links
-                            (filter #(= (:level %) level))
-                            (map (partial eval-link! level-map))
-                            (apply (partial merge-with concat)))]
+  (let [available-links  (->> links (filter #(every? available? (:inputs %))) )
+        level            (-> available-links first :level)
+        pending-links    (->> available-links (remove #(= (:level %) level)))
+        rvsm             (->> available-links
+                              (filter #(= (:level %) level))
+                              (map (partial eval-link! level-map))
+                              (apply (partial merge-with concat)))]
     [rvsm pending-links]))
 
 
@@ -397,22 +401,27 @@
   ([{:keys [links-map level-map] :as network}
     pending-links
     reactive-values]
-     (let [[rejected-values links] (update-reactive-values! links-map
+     (let [[pending-values links] (update-reactive-values! links-map
                                                             pending-links
                                                             reactive-values)
-           
            _ (dump-links links)
-           [rvsm pending-links] (eval-links! level-map links)]
+           [current-rvsm pending-links] (eval-links! level-map links)
+           #_ (println "CURRENT" (map str-rvalues current-rvsm))
+           previous-rvsm (reduce (fn [m [r v]]
+                                   (update-in m [r] (comp vec conj) v))
+                                 {}
+                                 (:values network))
+           #_ (println "PREVIOUS" (map str-rvalues previous-rvsm))]
        ;; rvsm is a map {reactive -> [[value timestamp]*]}
        ;; containing outputs across all evaluated links
-       (loop [rvss (seq rvsm)]
+       (loop [n (dissoc network :values)
+              rvss (merge-with concat previous-rvsm current-rvsm)]
          (let [top-rvs (topmost-values rvss)]
+           #_ (println "TOP" (map str-rvalue top-rvs))
            ;; top-rvs is a seq of pairs [reactive [value timestamp]]
-           (when (seq top-rvs)
-             (propagate! network pending-links top-rvs)
-             (recur (without-topmost-values rvss))))))
-     network))
-
+           (if (seq top-rvs)
+             (recur (propagate! n pending-links top-rvs) (without-topmost-values rvss))
+             (update-in n [:values] concat pending-values)))))))
 
 
 (defn push!
@@ -437,6 +446,8 @@
   IReactive
   (network-id [this] n-id)
   (get-value [this]
+    (first @a))
+  (get-value! [this]
     (when eventstream?
       (reset! avail? false))
     (first @a))
@@ -543,6 +554,13 @@
     new-r))
 
 
+(defn rhold
+  [reactive]
+  (derive-new behavior
+              "hold"
+              (make-sync-link-fn identity make-result-map)
+              [reactive]))
+
 
 (defn rmap
   [f & reactives]
@@ -594,7 +612,7 @@
                 "filter"
                 (make-link-fn f (fn [result ex inputs outputs]
                                   (if result
-                                    (make-result-map (-> inputs first get-value)
+                                    (make-result-map (-> inputs first get-value!)
                                                      ex
                                                      inputs
                                                      outputs))))
@@ -607,7 +625,7 @@
     (derive-new eventstream
               "take"
               (fn [inputs outputs]
-                (let [v (-> inputs first get-value)]
+                (let [v (-> inputs first get-value!)]
                   (if (> @c 0)
                     (do (swap! c dec)
                         (make-result-map v nil inputs outputs))
@@ -621,7 +639,7 @@
     (derive-new eventstream
                 "buffer"
                 (fn [inputs outputs]
-                  (let [v (-> inputs first get-value)]
+                  (let [v (-> inputs first get-value!)]
                     (when (>= (.size l) no)
                       (.removeLast l))
                     (.addFirst l v)
@@ -645,7 +663,7 @@
                 "delay"
                 (fn [inputs outputs]
                   (let [output (first outputs)
-                        v (-> inputs first get-value)]
+                        v (-> inputs first get-value!)]
                     (swap! tasks assoc output
                            (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
                 [reactive])))
@@ -682,7 +700,7 @@
         new-r (derive-new eventstream
                           "throttle"
                           (fn [inputs _]
-                            (let [v (-> inputs first get-value)]
+                            (let [v (-> inputs first get-value!)]
                               (swap! queue-atom enqueue v)))
                           [reactive])]
     (swap! tasks assoc new-r
@@ -691,7 +709,6 @@
                                     (when-not (empty? vs) (push! new-r (first vs))))
                                  millis millis TimeUnit/MILLISECONDS))
     new-r))
-
 
 
 
@@ -704,8 +721,11 @@
 (def e1 (eventstream n "e1"))
 (def e2 (eventstream n "e2"))
 
-(def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
-(subscribe #(println %)
+(def r (rmap + e1 e2))
+(subscribe #(println %) r)
+
+#_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
+#_ (subscribe #(println %)
            (rmerge f e2))
 
 
@@ -741,7 +761,7 @@
 
 (def p (behavior n "p" nil))
 (def a (rmapcat :addresses p))
-(def pname (rmap :name p))
+(def pname (rhold (rmap :name p)))
 (def pair (rmap vector pname a))
 (subscribe #(println "OUTPUT" %) pair)
 
