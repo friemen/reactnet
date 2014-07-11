@@ -53,10 +53,11 @@
 ;; a Result map (see below).
 
 ;; Result:
-;; A map with the following entries
-;;  :output-values    A map {reactive->value} containing the values for
-;;                    each output reactive, or a vector containing such maps.
-;; :exception         Exception, or nil if output-values is valid
+;; A map returned by a link function with the following entries
+;;  :output-values    A map {reactive -> value} containing the values for
+;;                    each output reactive, or a vector containing of such
+;;                    maps, i.e. {reactive -> [value*]}.                    
+;;  :exception        Exception, or nil if output-values is valid
 
 ;; Network:
 ;; A map containing
@@ -71,6 +72,10 @@
 ;;  :reactive     The reactive whose value is to be set
 ;;  :value        The value to set
 ;;  :timestamp    The timestamp in ms when the value was pushed
+
+;; Reactive Values:
+;; A map {reactive -> [[value timestamp]*]} containing for each reactive
+;; a vector of value-timestamp-pairs.
 
 
 ;; ---------------------------------------------------------------------------
@@ -212,6 +217,8 @@
 ;; Getting information about the reactive graph
 
 (defn reactives-from-links
+  "Returns a set of all reactives occurring as inputs our outputs in
+  links."
   [links]
   (->> links
        (mapcat (fn [l] (concat (:inputs l) (:outputs l))))
@@ -240,7 +247,9 @@
 
 
 (defn reactive-level-map
-  "Returns a map {reactive -> level} where level is a number representing topological order."
+  "Returns a map {reactive/link -> level} containing all reactives and
+  links in the network, where level is an integer representing
+  topological order."
   [links]
   (let [root (atom nil)
         rfm (reactive-followers-map links)
@@ -298,16 +307,19 @@
   [level-map {:keys [f inputs outputs level]}]
   (let [result (try (f inputs outputs)
                     (catch Exception ex {:exception ex}))
-        ;; make a vector with many {r->v} maps
+        ;; make a vector [{reactives -> value}*] with many maps
         rvms   (let [ov (:output-values result)]  
                  (if-not (sequential? ov) [ov] ov))
-        ;; make a map {r->[vs]} containing a vector of result values for each reactive
+        ;; make a map {reactive -> [[value timestamp]*]} containing a
+        ;; vector of result values for each reactive
         rvsm   (->> rvms
                     (mapcat seq)
                     (reduce (fn [m [r v]]
                               (if (< (level-map r) level)
+                                ;; push values whose level is lower
+                                ;; than current level into next cycle
                                 (do (push! r v (now))
-                                    m) ;; push values whose level is too low for current level
+                                    m)
                                 (update-in m [r] (comp vec conj) v)))
                             {}))]
     (handle-exception! result outputs)
@@ -329,14 +341,19 @@
            _ (dump (apply str (repeat 60 \-)))
            _ (dump (->> links (map str-link) (s/join "\n")))
            _ (dump (apply str (repeat 60 \-)))
+
+           ;; results in a map {reactive -> [[value timestamp]*]}
+           ;; containing outputs across all evaluated links
            rvsm (->> links
                      (filter #(= (:level %) level))
                      (map (partial eval-link! level-map))
                      (apply (partial merge-with concat)))
+           
            pending-links (remove #(= (:level %) level) links)]
        (loop [rvss (seq rvsm)]
          (let [non-empty-rvs (remove (comp empty? second) rvss)]
            (when (seq non-empty-rvs)
+             ;; non-empty-rvs is a seq of pairs [reactive [[value timestamp]+]]
              (let [new-stimuli (->> non-empty-rvs
                                     (map (fn [[r vs]] (make-stimulus r (first vs) (level-map r) (now))))
                                     seq)]
