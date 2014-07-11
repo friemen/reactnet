@@ -25,11 +25,17 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
-  (get-value [r]
-    "Returns current value of this reactive.")
   (network-id [r]
     "Returns a string containing the fully qualified name of a network
   agent var.")
+  (get-value [r]
+    "Returns current value of this reactive.")
+  (available? [r]
+    "Returns true if a value is available.")
+  (mark-available! [r]
+    "Marks this reactive as containing a value.")
+  (updateable? [r]
+    "Returns true if a new value is acceptable.")
   (silent-set! [r value-timestamp-pair]
     "Sets a pair of value and timestamp, returns true if a
   propagation of the value should be triggered.")
@@ -172,6 +178,7 @@
   [r]
   (str (:label r) ":" (get-value r)))
 
+
 (defn str-link  
   [l]
   (str "L" (:level l)
@@ -179,6 +186,11 @@
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
        "]"))
+
+
+(defn str-rvalue
+  [[r [v timestamp]]]
+  (str (:label r) ": " v))
 
 
 (defn pp
@@ -293,18 +305,29 @@
   reactive as one of their inputs."
   [links-map [reactive value-timestamp]]
   (if (silent-set! reactive value-timestamp)
-    (links-map reactive)))
+          [nil (links-map reactive)]
+          [nil nil])
+  
+  #_ (if (updateable? reactive)
+    (do (mark-available! reactive)
+        (if (silent-set! reactive value-timestamp)
+          [nil (links-map reactive)]
+          [nil nil]))
+    [[reactive value-timestamp] nil]))
 
 
 (defn- update-reactive-values!
-  "Updates all reactives, collects links to be evaluated afterwards,
+  "Updates all reactives, collects links to be subsequently evaluated,
   and returns a sorted distinct seq of links."
   [links-map pending-links reactive-values]
-  (->> reactive-values
-       (mapcat (partial update-reactive-value! links-map))
-       (concat pending-links)
-       (sort-by :level (comparator <))
-       distinct))
+  (let [results         (map (partial update-reactive-value! links-map) reactive-values)
+        rejected-values (->> results (map first) (remove nil?))
+        links           (->> results
+                             (mapcat second)
+                             (concat pending-links)
+                             (sort-by :level (comparator <))
+                             distinct)]
+    [rejected-values links]))
 
 
 (defn- eval-link!
@@ -374,9 +397,9 @@
   ([{:keys [links-map level-map] :as network}
     pending-links
     reactive-values]
-     (let [links (update-reactive-values! links-map
-                                          pending-links
-                                          reactive-values)
+     (let [[rejected-values links] (update-reactive-values! links-map
+                                                            pending-links
+                                                            reactive-values)
            
            _ (dump-links links)
            [rvsm pending-links] (eval-links! level-map links)]
@@ -384,7 +407,7 @@
        ;; containing outputs across all evaluated links
        (loop [rvss (seq rvsm)]
          (let [top-rvs (topmost-values rvss)]
-           ;; top-rvs is a seq of pairs [reactive [[value timestamp]+]]
+           ;; top-rvs is a seq of pairs [reactive [value timestamp]]
            (when (seq top-rvs)
              (propagate! network pending-links top-rvs)
              (recur (without-topmost-values rvss))))))
@@ -410,10 +433,16 @@
 ;; ---------------------------------------------------------------------------
 ;; A trivial implementation of the IReactive protocol
 
-(defrecord React [n-id label a eventstream? completed? error]
+(defrecord React [n-id label a eventstream? completed? avail? error]
   IReactive
-  (get-value [this] (first @a))
   (network-id [this] n-id)
+  (get-value [this]
+    (when eventstream?
+      (reset! avail? false))
+    (first @a))
+  (available? [r] @avail?)
+  (mark-available! [r] (reset! avail? true))
+  (updateable? [r] (or (not eventstream?) (not @avail?)))
   (silent-set! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
       (dump "SET" (str-react this) "<-" value)
@@ -436,6 +465,7 @@
              (atom [value (now)])
              false
              (atom false)
+             (atom true)
              (atom nil))))
 
 (defn behavior?
@@ -448,6 +478,7 @@
           label
           (atom [nil (System/currentTimeMillis)])
           true
+          (atom false)
           (atom false)
           (atom nil)))
 
@@ -712,7 +743,7 @@
 (def a (rmapcat :addresses p))
 (def pname (rmap :name p))
 (def pair (rmap vector pname a))
-(subscribe (async #(println "OUTPUT" %)) pair)
+(subscribe #(println "OUTPUT" %) pair)
 
 
 
