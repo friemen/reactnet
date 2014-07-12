@@ -3,8 +3,7 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Create unit tests
-;; - How is rmap expected to work? Only eval when all inputs have a new value available?
+;; - Create more unit tests
 ;; - Handle the initial state of the network
 ;; - Instead of error and completed fields use a wrapper around the value.
 ;; - Where exactly must a error be set: in an input?, in the link?, in an output?
@@ -84,7 +83,7 @@
 
 (declare push!)
 
-(defn- now
+(defn now
   []
   (System/currentTimeMillis))
 
@@ -104,6 +103,17 @@
        (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
 
 
+(defn make-output-value-map
+  [value outputs]
+  (reduce (fn [m r] (assoc m r value)) {} outputs))
+
+
+(defn make-result-map
+  [value ex inputs outputs]
+  {:output-values (if-not ex (make-output-value-map value outputs))
+   :exception ex})
+
+
 (defn make-async-link-fn
   [f result-fn]
   (fn [inputs outputs]
@@ -115,10 +125,12 @@
 
 
 (defn make-sync-link-fn
-  [f result-fn]
-  (fn [inputs outputs]
-    (let [[result ex] (safely-apply f (map consume! inputs))]
-      (result-fn result ex inputs outputs))))
+  ([f]
+     (make-sync-link-fn f make-result-map))
+  ([f result-fn]
+     (fn [inputs outputs]
+       (let [[result ex] (safely-apply f (map consume! inputs))]
+         (result-fn result ex inputs outputs)))))
 
 
 (defn async
@@ -131,17 +143,6 @@
   (if-let [f (:async fn-or-map)]
     [make-async-link-fn f]
     [make-sync-link-fn fn-or-map]))
-
-
-(defn make-output-value-map
-  [value outputs]
-  (reduce (fn [m r] (assoc m r value)) {} outputs))
-
-
-(defn make-result-map
-  [value ex inputs outputs]
-  {:output-values (if-not ex (make-output-value-map value outputs))
-   :exception ex})
 
 
 (declare reactives-from-links
@@ -157,7 +158,8 @@
      :reactives (reactives-from-links leveled-links)
      :links leveled-links
      :links-map (reactive-links-map leveled-links)
-     :level-map level-map}))
+     :level-map level-map
+     :values nil}))
 
 
 (defmacro defnetwork
@@ -205,7 +207,7 @@
     (println (str "Values\n" (s/join ", " (map str-react reactives))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
 
-(def debug? true)
+(def debug? false)
 
 (defn dump
   [& args]
@@ -391,7 +393,7 @@
        (map (fn [[r vs]] [r (vec (rest vs))]))))
 
 
-(defn- propagate!
+(defn propagate!
   "Executes one propagation cycle, returns the network."
   ([network reactive-values]
      (propagate! network [] reactive-values))
@@ -401,24 +403,22 @@
      (let [[pending-values links] (update-reactive-values! links-map
                                                             pending-links
                                                             reactive-values)
+           _ (dump "REJECTED " (map (juxt (comp :label first) (comp first second)) pending-values))
            _ (dump-links links)
            [current-rvsm pending-links] (eval-links! level-map links)
-           #_ (println "CURRENT" (map str-rvalues current-rvsm))
            previous-rvsm (reduce (fn [m [r v]]
                                    (update-in m [r] (comp vec conj) v))
                                  {}
-                                 (:values network))
-           #_ (println "PREVIOUS" (map str-rvalues previous-rvsm))]
+                                 (:values network))]
        ;; rvsm is a map {reactive -> [[value timestamp]*]}
        ;; containing outputs across all evaluated links
        (loop [n (dissoc network :values)
               rvss (merge-with concat previous-rvsm current-rvsm)]
          (let [top-rvs (topmost-values rvss)]
-           #_ (println "TOP" (map str-rvalue top-rvs))
            ;; top-rvs is a seq of pairs [reactive [value timestamp]]
            (if (seq top-rvs)
              (recur (propagate! n pending-links top-rvs) (without-topmost-values rvss))
-             (update-in n [:values] concat pending-values)))))))
+             (update-in n [:values] #(concat pending-values %))))))))
 
 
 (defn push!
