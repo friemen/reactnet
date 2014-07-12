@@ -30,15 +30,13 @@
   agent var.")
   (get-value [r]
     "Returns current value of this reactive.")
-  (get-value! [r]
+  (consume! [r]
     "Returns current value of this reactive and may turn the state into unavailable.")
   (available? [r]
     "Returns true if a value is available.")
-  (mark-available! [r]
-    "Marks this reactive as containing a value.")
-  (updateable? [r]
-    "Returns true if a new value is acceptable.")
-  (silent-set! [r value-timestamp-pair]
+  (busy? [r]
+    "Returns true if the reactive cannot accept a new value.")
+  (deliver! [r value-timestamp-pair]
     "Sets a pair of value and timestamp, returns true if a
   propagation of the value should be triggered.")
   (set-error! [r ex]
@@ -109,7 +107,7 @@
 (defn make-async-link-fn
   [f result-fn]
   (fn [inputs outputs]
-    (future (let [[result ex] (safely-apply f (map get-value! inputs))
+    (future (let [[result ex] (safely-apply f (map consume! inputs))
                   result-map (result-fn result ex inputs outputs)]
               (doseq [[r v] (:output-values result-map)]
                 (push! r v))))
@@ -119,7 +117,7 @@
 (defn make-sync-link-fn
   [f result-fn]
   (fn [inputs outputs]
-    (let [[result ex] (safely-apply f (map get-value! inputs))]
+    (let [[result ex] (safely-apply f (map consume! inputs))]
       (result-fn result ex inputs outputs))))
 
 
@@ -311,11 +309,10 @@
   "Updates a reactive's value and returns the links that have the
   reactive as one of their inputs."
   [links-map [reactive value-timestamp]]
-  (if (updateable? reactive)
-    (do (mark-available! reactive)
-        (if (silent-set! reactive value-timestamp)
-          [nil (links-map reactive)]
-          [nil nil]))
+  (if-not (busy? reactive)
+    (if (deliver! reactive value-timestamp)
+      [nil (links-map reactive)]
+      [nil nil])
     [[reactive value-timestamp] nil]))
 
 
@@ -447,17 +444,17 @@
   (network-id [this] n-id)
   (get-value [this]
     (first @a))
-  (get-value! [this]
+  (consume! [this]
     (when eventstream?
       (reset! avail? false))
     (first @a))
   (available? [r] @avail?)
-  (mark-available! [r] (reset! avail? true))
-  (updateable? [r] (or (not eventstream?) (not @avail?)))
-  (silent-set! [this [value timestamp]]
+  (busy? [r] (and eventstream? @avail?))
+  (deliver! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
       (dump "SET" (str-react this) "<-" value)
       (reset! a [value timestamp])
+      (reset! avail? true)
       true))
   (set-error! [this ex] (reset! error ex))
   (error [this] @error)
@@ -612,7 +609,7 @@
                 "filter"
                 (make-link-fn f (fn [result ex inputs outputs]
                                   (if result
-                                    (make-result-map (-> inputs first get-value!)
+                                    (make-result-map (-> inputs first consume!)
                                                      ex
                                                      inputs
                                                      outputs))))
@@ -625,7 +622,7 @@
     (derive-new eventstream
               "take"
               (fn [inputs outputs]
-                (let [v (-> inputs first get-value!)]
+                (let [v (-> inputs first consume!)]
                   (if (> @c 0)
                     (do (swap! c dec)
                         (make-result-map v nil inputs outputs))
@@ -639,7 +636,7 @@
     (derive-new eventstream
                 "buffer"
                 (fn [inputs outputs]
-                  (let [v (-> inputs first get-value!)]
+                  (let [v (-> inputs first consume!)]
                     (when (>= (.size l) no)
                       (.removeLast l))
                     (.addFirst l v)
@@ -663,7 +660,7 @@
                 "delay"
                 (fn [inputs outputs]
                   (let [output (first outputs)
-                        v (-> inputs first get-value!)]
+                        v (-> inputs first consume!)]
                     (swap! tasks assoc output
                            (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
                 [reactive])))
@@ -700,7 +697,7 @@
         new-r (derive-new eventstream
                           "throttle"
                           (fn [inputs _]
-                            (let [v (-> inputs first get-value!)]
+                            (let [v (-> inputs first consume!)]
                               (swap! queue-atom enqueue v)))
                           [reactive])]
     (swap! tasks assoc new-r
@@ -767,3 +764,4 @@
 
 
 
+:ok
