@@ -4,16 +4,22 @@
 
 ;; TODOs
 ;; - Create more unit tests
-;; - Handle the initial state of the network
-;; - Instead of error and completed fields use a wrapper around the value.
-;; - Where exactly must a error be set: in an input?, in the link?, in an output?
-;; - Make use of completed state
 ;; - Implement 'concat' combinator, which requires the completed state
+;; - Handle the initial state of the network
 ;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
 ;; - Limit max number of items in agents pending queue (provides back pressure)
 ;; - Add pause! and resume! for the network
 
+
+;; Ideas about error handling
+;; - An exception is thrown by custom functions invoked from a link
+;;   function, therefore remove the error/set-error! from IReactive
+;; - A link contains an error-handler function
+;; - It should support features like 'return', 'retry', 'resume', 'ignore'
+;; - It should allow redirection of an exception to a specific eventstream
+;; - A retry would push! the same values again
+;; - Special care must be taken for async operations
 
 
 ;; ---------------------------------------------------------------------------
@@ -37,28 +43,30 @@
     "Returns true if the reactive cannot accept a new value.")
   (deliver! [r value-timestamp-pair]
     "Sets a pair of value and timestamp, returns true if a
-  propagation of the value should be triggered.")
-  (set-error! [r ex]
-    "Stores the exception in this reactive.")
-  (error [r]
-    "Returns the exception if in error state, nil otherwise."))
+  propagation of the value should be triggered."))
 
 
 ;; Link:
 ;; A map that combines m input reactives, n output reactives and a link function f.
-;;  :label    Label for pretty printing
-;;  :inputs   Input reactives
-;;  :outputs  Output reactives
-;;  :f        A link function (see below)
-;;  :level    The level within the reactive network
-;;            (max level of all input reactives + 1)
+;;  :label          Label for pretty printing
+;;  :inputs         Input reactives
+;;  :outputs        Output reactives
+;;  :f              A link function (see below)
+;;  :error-handler  An error handler function
+;;  :level          The level within the reactive network
+;;                  (max level of all input reactives + 1)
 
 ;; Link function:
-;; A function takes 2 vectors (input reactives, output reactives) and returns
+;; A function that takes two args (input and output reactive) and returns
 ;; a Result map (see below).
+
+;; Error Handler function
+;; A function that takes the link and the Result map that the link function
+;; returned. It may return a new Result map (see below) or nil.
 
 ;; Result:
 ;; A map returned by a link function with the following entries
+;;  :input-values     A map {reactive -> value} containing the input values
 ;;  :output-values    A map {reactive -> value} containing the values for
 ;;                    each output reactive, or a vector containing of such
 ;;                    maps, i.e. {reactive -> [value*]}.                    
@@ -283,6 +291,16 @@
     level-map-incl-links))
 
 
+(defn reactive-values-map
+  "Returns a reactive values map {reactive -> [[value timestamp]+]
+  from a sequence of pairs [reactive [value timestamp]]."
+  [rv-pairs]
+  (reduce (fn [m [r v]]
+            (update-in m [r] (comp vec conj) v))
+          {}
+          rv-pairs))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Modifying the network
 
@@ -299,12 +317,13 @@
 ;; ---------------------------------------------------------------------------
 ;; Propagation within network
 
+
 (defn- handle-exception!
-  [{:keys [exception]} outputs]
+  [{:keys [error-handler] :as link} {:keys [exception] :as result}]
   (when exception
-    (.printStackTrace exception)
-    (doseq [r outputs] ;; are outputs the right addressee?
-      (set-error! r exception))))
+    (if error-handler
+      (error-handler link result)
+      (.printStackTrace exception))))
 
 
 (defn- update-reactive-value!
@@ -337,26 +356,32 @@
   reactives that can be updated in the same cycle. Values for
   reactives that are below the link's level will be pushed to the
   network for processing in the next cycle."
-  [level-map {:keys [f inputs outputs level]}]
-  (let [timestamp (now)
-        result    (try (f inputs outputs)
-                       (catch Exception ex {:exception ex}))
+  [level-map {:keys [f inputs outputs level] :as link}]
+  (let [timestamp     (now)
+        result        (merge {:input-values (->> inputs
+                                                 (map #(vector % (get-value %)))
+                                                 (into {}))}
+                             (try (f inputs outputs)
+                                  (catch Exception ex {:exception ex})))
+        error-result  (handle-exception! link result)
         ;; make a vector [{reactives -> value}*] with many maps
-        rvms      (let [ov (:output-values result)]  
-                    (if-not (sequential? ov) [ov] ov))
+        rvms          (let [ov (:output-values (merge result error-result))]  
+                        (if-not (sequential? ov) [ov] ov))
         ;; make a Reactive Values map {reactive -> [[value timestamp]*]}
         ;; containing for each reactive a vector of result value / timestamp pairs
-        rvsm      (->> rvms
-                       (mapcat seq)
-                       (reduce (fn [m [r v]]
-                                 (if (< (level-map r) level)
-                                   ;; push values whose level is lower
-                                   ;; than current level into next cycle
-                                   (do (push! r v timestamp)
-                                       m)
-                                   (update-in m [r] (comp vec conj) [v timestamp])))
-                               {}))]
-    (handle-exception! result outputs)
+        rvsm          (->> rvms
+                           (mapcat seq)
+                           (reduce (fn [m [r v]]
+                                     (let [r-level (level-map r)]
+                                       (if (or (nil? r-level) (< r-level level))
+                                         ;; push values into next cacle
+                                         ;; whose reactive level is either
+                                         ;; unknown or is lower than
+                                         ;; current level
+                                         (do (push! r v timestamp)
+                                             m)
+                                         (update-in m [r] (comp vec conj) [v timestamp]))))
+                                   {}))]
     rvsm))
 
 
@@ -401,17 +426,14 @@
     pending-links
     reactive-values]
      (let [[pending-values links] (update-reactive-values! links-map
-                                                            pending-links
-                                                            reactive-values)
+                                                           pending-links
+                                                           reactive-values)
            _ (dump "REJECTED " (map (juxt (comp :label first) (comp first second)) pending-values))
            _ (dump-links links)
+           ;; *-rvsm is a map {reactive -> [[value timestamp]*]}
            [current-rvsm pending-links] (eval-links! level-map links)
-           previous-rvsm (reduce (fn [m [r v]]
-                                   (update-in m [r] (comp vec conj) v))
-                                 {}
-                                 (:values network))]
-       ;; rvsm is a map {reactive -> [[value timestamp]*]}
-       ;; containing outputs across all evaluated links
+           previous-rvsm (reactive-values-map (:values network))]
+
        (loop [n (dissoc network :values)
               rvss (merge-with concat previous-rvsm current-rvsm)]
          (let [top-rvs (topmost-values rvss)]
@@ -425,7 +447,7 @@
   "Starts asynchronously a propagation cycle, where initially the
   reactive is updated with the given value. Returns the value."
   ([reactive value]
-     (push! reactive value (System/currentTimeMillis)))
+     (push! reactive value (now)))
   ([reactive value timestamp]
      (send-off (-> reactive network-id network-by-id)
                propagate!
@@ -439,7 +461,7 @@
 ;; ---------------------------------------------------------------------------
 ;; A trivial implementation of the IReactive protocol
 
-(defrecord React [n-id label a eventstream? completed? avail? error]
+(defrecord React [n-id label a eventstream? completed? avail?]
   IReactive
   (network-id [this] n-id)
   (get-value [this]
@@ -456,8 +478,6 @@
       (reset! a [value timestamp])
       (reset! avail? true)
       true))
-  (set-error! [this ex] (reset! error ex))
-  (error [this] @error)
   clojure.lang.IDeref
   (deref [this] (first @a)))
 
@@ -473,8 +493,7 @@
              (atom [value (now)])
              false
              (atom false)
-             (atom true)
-             (atom nil))))
+             (atom true))))
 
 (defn behavior?
   [r]
@@ -487,8 +506,7 @@
           (atom [nil (System/currentTimeMillis)])
           true
           (atom false)
-          (atom false)
-          (atom nil)))
+          (atom false)))
 
 (defn eventstream?
   [r]

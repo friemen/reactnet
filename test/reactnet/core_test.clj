@@ -7,12 +7,12 @@
 
 (defn behavior
   [label value]
-  (React. "" label (atom [value (r/now)]) false (atom false) (atom true) (atom nil)))
+  (React. "" label (atom [value (r/now)]) false (atom false) (atom true)))
 
 
 (defn eventstream
   [label]
-  (React. "" label (atom [nil (r/now)]) true (atom false) (atom false) (atom nil)))
+  (React. "" label (atom [nil (r/now)]) true (atom false) (atom false)))
 
 
 (defmacro link
@@ -25,17 +25,17 @@
   (r/make-network "" links))
 
 
-(defn values
-  [r-v-pairs]
-  (map (fn [[r v]] {r [v (r/now)]}) r-v-pairs))
+(defn rv
+  [r v]
+  {r [v (r/now)]})
+
 
 (deftest z=x+y-test
   (let [x (behavior "x" 1)
         y (behavior "y" 2)
         z (behavior "z" 0)
         n (network (link + [x y] [z]))]
-    (r/propagate! n {x [2 (r/now)]
-                     y [3 (r/now)]})
+    (r/propagate! n (merge (rv x 2) (rv y 3)))
     (are [rs vs] (= (mapv deref rs) vs)
          [x y z] [2 3 5])))
 
@@ -49,10 +49,22 @@
                    (link * [x+2 x] [z])
                    (link (partial swap! results conj) [z] []))]
     (->> (range 1 11)
-         (map (partial vector x))
-         values
+         (map (partial rv x))
          (reduce r/propagate! n))
     (is (= @results [3 8 15 24 35 48 63 80 99 120]))))
+
+
+(deftest incomplete-inputs-test
+  (let [e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        r  (eventstream "r")
+        sums (atom [])
+        n (network (link + [e1 e2] [r])
+                   (link (partial swap! sums conj) [r] []))]
+    (r/propagate! n (rv e1 1))
+    (is (nil? @r))
+    (r/propagate! n (rv e2 1))
+    (is (= 2 @r))))
 
 
 (deftest pending-values-test
@@ -62,7 +74,7 @@
         n (network (link identity [e1] [e2])
                    (link identity [e2] [e3]))
         n-after (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
-                     values
+                     (map (partial apply rv))
                      (reduce r/propagate! n))
         pending-values (reduce (fn [m [r [v t]]]
                                  (update-in m [r] (comp vec conj) v))
@@ -82,6 +94,6 @@
                    (link identity [e2] [m])
                    (link (partial swap! results conj) [m] []))]
     (->> [[e1 :foo] [e2 :bar]]
-         values
+         (map (partial apply rv))
          (reduce r/propagate! n))
     (is (= [:foo :bar] @results))))
