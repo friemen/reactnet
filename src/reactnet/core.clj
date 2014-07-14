@@ -3,7 +3,7 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Create unit tests for mapcat and cyclic deps
+;; - Create unit tests for cyclic deps
 ;; - Implement 'concat' combinator, which requires the completed state
 ;; - Handle the initial state of the network
 ;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
@@ -50,6 +50,8 @@
     "Returns true if a value is available.")
   (busy? [r]
     "Returns true if the reactive cannot accept a new value.")
+  (completed? [r]
+    "Returns true if the reactive will neither accept nor return a new value.")
   (deliver! [r value-timestamp-pair]
     "Sets a pair of value and timestamp, returns true if a
   propagation of the value should be triggered."))
@@ -373,7 +375,7 @@
                              (try (f inputs outputs)
                                   (catch Exception ex {:exception ex})))
         error-result  (handle-exception! link result)
-        ;; make a vector [{reactives -> value}*] with many maps
+        ;; make a vector [{reactive -> value}*] with many maps
         rvms          (let [ov (:output-values (merge result error-result))]  
                         (if-not (sequential? ov) [ov] ov))
         ;; make a Reactive Values map {reactive -> [[value timestamp]*]}
@@ -383,8 +385,8 @@
                            (reduce (fn [m [r v]]
                                      (let [r-level (level-map r)]
                                        (if (or (nil? r-level) (< r-level level))
-                                         ;; push values into next cacle
-                                         ;; whose reactive level is either
+                                         ;; push value into next cycle
+                                         ;; if reactive level is either
                                          ;; unknown or is lower than
                                          ;; current level
                                          (do (push! r v timestamp)
@@ -470,6 +472,9 @@
 ;; ---------------------------------------------------------------------------
 ;; A basic implementation of the IReactive protocol
 
+(def COMPLETED ::completed)
+
+
 (defrecord React [n-id label a eventstream? completed? avail?]
   IReactive
   (network-id [this]
@@ -484,6 +489,8 @@
     @avail?)
   (busy? [r]
     (and eventstream? @avail?))
+  (completed? [r]
+    (= COMPLETED (get-value @a)))
   (deliver! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
       (dump "SET" (str-react this) "<-" value)
@@ -540,10 +547,12 @@
     (:last-value  (swap! seq-val-atom (fn [{:keys [seq]}]
                                         {:seq (next seq)
                                          :last-value (first seq)}))))
-  (available? [r]
+  (available? [this]
     (-> seq-val-atom deref :seq seq))
-  (busy? [r]
+  (busy? [this]
     true)
+  (completed? [this]
+    (-> seq-val-atom deref :seq nil?))
   (deliver! [r value-timestamp-pair]
     (throw (UnsupportedOperationException. "Unable to deliver a value to a seq"))))
 

@@ -7,7 +7,7 @@
 
 (defn seqstream
   [xs]
-  (SeqStream. "" (atom {:seq (seq xs)})))
+  (SeqStream. "" (atom {:seq (seq xs)}) true))
 
 
 (defn behavior
