@@ -1,8 +1,13 @@
 (ns reactnet.core-test
   (:require [clojure.test :refer :all]
             [reactnet.core :as r])
-  (:import [reactnet.core React]))
+  (:import [reactnet.core SeqStream React]))
 
+
+
+(defn seqstream
+  [xs]
+  (SeqStream. "" (atom {:seq (seq xs)})))
 
 
 (defn behavior
@@ -97,3 +102,26 @@
          (map (partial apply rv))
          (reduce r/propagate! n))
     (is (= [:foo :bar] @results))))
+
+
+
+
+(deftest mapcat-test
+  (let [results (atom [])
+        e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        e3 (eventstream "e3")
+        e4 (eventstream "e4")
+        numbers (seqstream (range))
+        n (network (r/make-link "items"
+                                (fn [inputs outputs]
+                                  {:output-values (mapv
+                                                   (partial hash-map (first outputs))
+                                                   (-> inputs first r/consume! :items))})
+                                [e1] [e2])
+                   (link name [e2] [e3])
+                   (link vector [numbers e3] [e4])
+                   (link (partial swap! results conj) [e4] []))]
+    (r/propagate! n (rv e1 {:items [:foo :bar :baz]}))
+    (is (= [[0 "foo"] [1 "bar"] [2 "baz"]] @results))))
+

@@ -3,18 +3,27 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Create more unit tests
+;; - Create unit tests for mapcat and cyclic deps
 ;; - Implement 'concat' combinator, which requires the completed state
 ;; - Handle the initial state of the network
 ;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
-;; - Limit max number of items in agents pending queue (provides back pressure)
+;; - Back pressure: limit max number of items in agents pending queue and stored values in network
 ;; - Add pause! and resume! for the network
+;; - Graphviz visualization of the graph
+;; - Support core.async
+;; - Support interceptor?
+;; - Changing the network must preserve pending values
 
+;; Ideas about completed state
+;; - A reactive becomes obsolete if it is not part of any link.
+;; - A completed reactive must not receive any outputs -> remove it from links :outputs.
+;; - A link with only completed inputs is 'dead'
+;; - Derived reactives become completed when all links delivering to them are dead.
 
 ;; Ideas about error handling
 ;; - An exception is thrown by custom functions invoked from a link
-;;   function, therefore remove the error/set-error! from IReactive
+;;   function
 ;; - A link contains an error-handler function
 ;; - It should support features like 'return', 'retry', 'resume', 'ignore'
 ;; - It should allow redirection of an exception to a specific eventstream
@@ -34,7 +43,7 @@
     "Returns a string containing the fully qualified name of a network
   agent var.")
   (get-value [r]
-    "Returns current value of this reactive.")
+    "Returns latest value of this reactive.")
   (consume! [r]
     "Returns current value of this reactive and may turn the state into unavailable.")
   (available? [r]
@@ -459,19 +468,22 @@
 ;; BELOW HERE STARTS EXPERIMENTAL NEW REACTOR API IMPL
 
 ;; ---------------------------------------------------------------------------
-;; A trivial implementation of the IReactive protocol
+;; A basic implementation of the IReactive protocol
 
 (defrecord React [n-id label a eventstream? completed? avail?]
   IReactive
-  (network-id [this] n-id)
+  (network-id [this]
+    n-id)
   (get-value [this]
     (first @a))
   (consume! [this]
     (when eventstream?
       (reset! avail? false))
     (first @a))
-  (available? [r] @avail?)
-  (busy? [r] (and eventstream? @avail?))
+  (available? [r]
+    @avail?)
+  (busy? [r]
+    (and eventstream? @avail?))
   (deliver! [this [value timestamp]]
     (when (or eventstream? (not= (first @a) value))
       (dump "SET" (str-react this) "<-" value)
@@ -479,10 +491,12 @@
       (reset! avail? true)
       true))
   clojure.lang.IDeref
-  (deref [this] (first @a)))
+  (deref [this]
+    (first @a)))
 
 (prefer-method print-method java.util.Map clojure.lang.IDeref)
 (prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
+
 
 (defn behavior
   ([n-agent label]
@@ -511,6 +525,35 @@
 (defn eventstream?
   [r]
   (= (:eventstream? r) true))
+
+
+;; ---------------------------------------------------------------------------
+;; An IReactive implementation based on a sequence
+
+(defrecord SeqStream [n-id seq-val-atom eventstream?]
+  IReactive
+  (network-id [this]
+    n-id)
+  (get-value [this]
+    (-> seq-val-atom deref :last-value))
+  (consume! [this]
+    (:last-value  (swap! seq-val-atom (fn [{:keys [seq]}]
+                                        {:seq (next seq)
+                                         :last-value (first seq)}))))
+  (available? [r]
+    (-> seq-val-atom deref :seq seq))
+  (busy? [r]
+    true)
+  (deliver! [r value-timestamp-pair]
+    (throw (UnsupportedOperationException. "Unable to deliver a value to a seq"))))
+
+
+(defn seqstream
+  [n-agent xs]
+  (SeqStream. (-> n-agent deref :id)
+              (atom {:seq (seq xs)
+                     :last-value nil})
+              true))
 
 
 ;; ---------------------------------------------------------------------------

@@ -2,6 +2,8 @@
 
 Serialized value propagation through a network of reactives.
 
+[![Build Status](https://travis-ci.org/friemen/reactnet.png?branch=master)](https://travis-ci.org/friemen/reactnet)
+
 Obviously this will limit throughput, but has the benefit of lower
 probability for so-called glitches.
 
