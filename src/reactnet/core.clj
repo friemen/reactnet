@@ -17,8 +17,10 @@
 
 ;; Ideas about completed state
 ;; - A reactive becomes obsolete if it is not part of any link.
+;; - Completed does no apply to behaviours, but it is a general concept
 ;; - A completed reactive must not receive any outputs -> remove it from links :outputs.
-;; - A link with only completed inputs is 'dead'
+;; - A link with one completed input is 'dead'
+;; - A link with only completed outputs is 'dead'
 ;; - Derived reactives become completed when all links delivering to them are dead.
 
 ;; Ideas about error handling
@@ -48,8 +50,6 @@
     "Returns current value of this reactive and may turn the state into unavailable.")
   (available? [r]
     "Returns true if a value is available.")
-  (busy? [r]
-    "Returns true if the reactive cannot accept a new value.")
   (completed? [r]
     "Returns true if the reactive will neither accept nor return a new value.")
   (deliver! [r value-timestamp-pair]
@@ -90,7 +90,6 @@
 ;;  :reactives      Set of reactives (derived)
 ;;  :level-map      Map {reactive -> topological-level} (derived)
 ;;  :links-map      Map {reactive -> Seq of links} (derived)
-;;  :values         Seq of pending values in the form [reactive [value timestamp]]
 
 ;; Reactive Values:
 ;; A map {reactive -> [[value timestamp]*]} containing for each
@@ -177,8 +176,7 @@
      :reactives (reactives-from-links leveled-links)
      :links leveled-links
      :links-map (reactive-links-map leveled-links)
-     :level-map level-map
-     :values nil}))
+     :level-map level-map}))
 
 
 (defmacro defnetwork
@@ -207,7 +205,7 @@
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
        "] " (if (every? available? (:inputs l))
-              "WILL EVALUATE" "incomplete inputs")))
+              "READY" "incomplete")))
 
 
 (defn str-rvalue
@@ -222,9 +220,16 @@
 (defn pp
   [n-agent]
   (let [links (:links @n-agent)
-        reactives (:reactives @n-agent)]
-    (println (str "Values\n" (s/join ", " (map str-react reactives))
-                  "\nLinks\n" (s/join "\n" (map str-link links))))))
+        reactives (:reactives @n-agent)
+        rvsm (reduce (fn [m [r [v t]]]
+                       (update-in m [r] (comp vec conj) v))
+                     {}
+                     (:values @n-agent))]
+    (println (str "Reactives\n" (s/join "\n" (map str-react reactives))
+                  "\nLinks\n" (s/join "\n" (map str-link links))
+                  "\nPending\n" (s/join "\n" (map (fn [[r vs]]
+                                                    (str (:label r) " " vs))
+                                                  rvsm))))))
 
 (def debug? false)
 
@@ -240,6 +245,14 @@
   (dump (apply str (repeat 60 \-)))
   (dump (->> links (map str-link) (s/join "\n")))
   (dump (apply str (repeat 60 \-))))
+
+
+(defn dump-values
+  [label rvs]
+  (dump label (->> rvs
+                   (map (fn [[r [v t]]]
+                          (str (:label r) " " v)))
+                   (s/join ", "))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -338,95 +351,78 @@
 
 
 (defn- update-reactive-value!
-  "Updates a reactive's value and returns the links that have the
-  reactive as one of their inputs."
+  "Updates a reactive's value if the reactive is not
+  completed. Returns a pair of the possibly rejected value and the
+  links that must be evaluated afterwards."
   [links-map [reactive value-timestamp]]
-  (if-not (busy? reactive)
+  (if (completed? reactive)
+    nil ;; just ignore completed, do nothing else
     (if (deliver! reactive value-timestamp)
-      [nil (links-map reactive)]
-      [nil nil])
-    [[reactive value-timestamp] nil]))
+      (links-map reactive) ;; propagate change to links
+      nil))) ;; do nothing else
 
 
 (defn- update-reactive-values!
   "Updates all reactives, collects links to be subsequently evaluated,
   and returns a sorted distinct seq of links."
   [links-map pending-links reactive-values]
-  (let [results         (map (partial update-reactive-value! links-map) reactive-values)
-        rejected-values (->> results (map first) (remove nil?))
-        links           (->> results
-                             (mapcat second)
-                             (concat pending-links)
-                             (sort-by :level (comparator <))
-                             distinct)]
-    [rejected-values links]))
+  (->> reactive-values
+       (map (partial update-reactive-value! links-map))
+       (apply concat)
+       (concat pending-links)
+       (sort-by :level (comparator <))
+       distinct))
 
 
 (defn- eval-link!
-  "Evaluates one link, returning a reactive values map for those
-  reactives that can be updated in the same cycle. Values for
-  reactives that are below the link's level will be pushed to the
-  network for processing in the next cycle."
-  [level-map {:keys [f inputs outputs level] :as link}]
+  "Evaluates one link, returning a seq of reactive value pairs."
+  [{:keys [f inputs outputs level] :as link}]
   (let [timestamp     (now)
         result        (merge {:input-values (->> inputs
                                                  (map #(vector % (get-value %)))
                                                  (into {}))}
                              (try (f inputs outputs)
                                   (catch Exception ex {:exception ex})))
-        error-result  (handle-exception! link result)
-        ;; make a vector [{reactive -> value}*] with many maps
-        rvms          (let [ov (:output-values (merge result error-result))]  
-                        (if-not (sequential? ov) [ov] ov))
-        ;; make a Reactive Values map {reactive -> [[value timestamp]*]}
-        ;; containing for each reactive a vector of result value / timestamp pairs
-        rvsm          (->> rvms
-                           (mapcat seq)
-                           (reduce (fn [m [r v]]
-                                     (let [r-level (level-map r)]
-                                       (if (or (nil? r-level) (< r-level level))
-                                         ;; push value into next cycle
-                                         ;; if reactive level is either
-                                         ;; unknown or is lower than
-                                         ;; current level
-                                         (do (push! r v timestamp)
-                                             m)
-                                         (update-in m [r] (comp vec conj) [v timestamp]))))
-                                   {}))]
-    rvsm))
+        error-result  (handle-exception! link result)]
+    (let [ov (:output-values (merge result error-result))]  
+      (map (fn [[r v]] [r [v timestamp]])
+           (if-not (sequential? ov)
+             (seq ov)
+             (mapcat seq ov))))))
+
+
+(defn- ready?
+  "Returns true for a link if
+  - all inputs are available
+  - at least one output is not completed"
+  [{:keys [inputs outputs]}]
+  (and (every? available? inputs)
+       (remove completed? outputs)))
 
 
 (defn- eval-links!
   "From a seq of links, sorted ascending by level, evaluates all links
   in the same level as the first. 
-  Returns a pair of reactive values and a seq of unevaluated links."
+  Returns a pair of a reactive values seq and an unevaluated links seq."
   [level-map links]
-  (let [available-links  (->> links (filter #(every? available? (:inputs %))) )
+  (let [available-links  (->> links (filter ready?))
         level            (-> available-links first :level)
-        pending-links    (->> available-links (remove #(= (:level %) level)))
-        rvsm             (->> available-links
-                              (filter #(= (:level %) level))
-                              (map (partial eval-link! level-map))
-                              (apply (partial merge-with concat)))]
-    [rvsm pending-links]))
-
-
-(defn- topmost-values
-  "Returns a seq of pairs [reactive -> [value timestamp]] for all
-  reactives that have a value left."
-  [reactive-values]
-  (->> reactive-values
-       (remove (comp empty? second))
-       (map (fn [[r vs]] [r (first vs)]))))
-
-
-(defn- without-topmost-values
-  "Returns a seq of pairs [reactive [[value timestamp]+]] where the
-  first value-timestamp pair for each reactive is dropped."
-  [reactive-values]
-  (->> reactive-values
-       (remove (comp empty? second))
-       (map (fn [[r vs]] [r (vec (rest vs))]))))
+        same-level?      (fn [l] (= (:level l) level))
+        upstream?        (fn [[r _]]
+                           (let [r-level (level-map r)]
+                             (or (nil? r-level) (< r-level level))))
+        pending-links    (->> available-links (remove same-level?))
+        rvs              (->> available-links
+                              (filter same-level?)
+                              (mapcat eval-link!))]
+    ;; push value into next cycle if reactive level is either
+    ;; unknown or is lower than current level
+    (doseq [[r [v t]] (filter upstream? rvs)]
+      (push! r v t))
+    [(->> rvs
+          (remove upstream?)
+          (sort-by (comp level-map first) (comparator <)))
+     pending-links]))
 
 
 (defn propagate!
@@ -436,22 +432,28 @@
   ([{:keys [links-map level-map] :as network}
     pending-links
     reactive-values]
-     (let [[pending-values links] (update-reactive-values! links-map
-                                                           pending-links
-                                                           reactive-values)
-           _ (dump "REJECTED " (map (juxt (comp :label first) (comp first second)) pending-values))
+     (dump (apply str (repeat 60 "=")))
+     (dump-values "PROPAGATE:" reactive-values)
+     (let [links (update-reactive-values! links-map
+                                          pending-links
+                                          reactive-values)
            _ (dump-links links)
-           ;; *-rvsm is a map {reactive -> [[value timestamp]*]}
-           [current-rvsm pending-links] (eval-links! level-map links)
-           previous-rvsm (reactive-values-map (:values network))]
+           ;; *-rvs is a sequence of reactive value pairs [r v]
+           [current-rvs pending-links] (eval-links! level-map links)]
 
-       (loop [n (dissoc network :values)
-              rvss (merge-with concat previous-rvsm current-rvsm)]
-         (let [top-rvs (topmost-values rvss)]
-           ;; top-rvs is a seq of pairs [reactive [value timestamp]]
-           (if (seq top-rvs)
-             (recur (propagate! n pending-links top-rvs) (without-topmost-values rvss))
-             (update-in n [:values] #(concat pending-values %))))))))
+       (dump-values "RVS:" current-rvs)
+
+       (loop [n network
+              rvs current-rvs]
+         (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
+                                             (if (rvm r)
+                                               [rvm (conj remaining [r vt])]
+                                               [(assoc rvm r vt) remaining]))
+                                           [{} []]
+                                           rvs)]
+           (if (seq rvm)
+             (recur (propagate! n pending-links rvm) remaining-rvs)
+             n))))))
 
 
 (defn push!
@@ -470,32 +472,25 @@
 ;; BELOW HERE STARTS EXPERIMENTAL NEW REACTOR API IMPL
 
 ;; ---------------------------------------------------------------------------
-;; A basic implementation of the IReactive protocol
-
-(def COMPLETED ::completed)
+;; A Behavior implementation of the IReactive protocol
 
 
-(defrecord React [n-id label a eventstream? completed? avail?]
+(defrecord Behavior [n-id label a]
   IReactive
   (network-id [this]
     n-id)
   (get-value [this]
     (first @a))
   (consume! [this]
-    (when eventstream?
-      (reset! avail? false))
     (first @a))
   (available? [r]
-    @avail?)
-  (busy? [r]
-    (and eventstream? @avail?))
+    true)
   (completed? [r]
-    (= COMPLETED (get-value @a)))
+    (= ::completed (first @a)))
   (deliver! [this [value timestamp]]
-    (when (or eventstream? (not= (first @a) value))
+    (when (not= (first @a) value)
       (dump "SET" (str-react this) "<-" value)
       (reset! a [value timestamp])
-      (reset! avail? true)
       true))
   clojure.lang.IDeref
   (deref [this]
@@ -509,29 +504,57 @@
   ([n-agent label]
      (behavior n-agent label nil))
   ([n-agent label value]
-     (React. (-> n-agent deref :id)
-             label
-             (atom [value (now)])
-             false
-             (atom false)
-             (atom true))))
+     (Behavior. (-> n-agent deref :id)
+                label
+                (atom [value (now)]))))
 
-(defn behavior?
-  [r]
-  (= (:eventstream? r) false))
+
+;; ---------------------------------------------------------------------------
+;; A buffered Eventstream implementation of the IReactive protocol
+
+
+(defrecord Eventstream [n-id label a n]
+  IReactive
+  (network-id [this]
+    n-id)
+  (get-value [this]
+    (:last-value @a))
+  (consume! [this]
+    (:last-value (swap! a (fn [{:keys [queue] :as a}]
+                            (when (empty? queue)
+                              (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
+                            (assoc a
+                              :last-value (ffirst queue)
+                              :queue (pop queue))))))
+  (available? [r]
+    (seq (:queue @a)))
+  (completed? [r]
+    (and (:completed @a) (empty? (:queue @a))))
+  (deliver! [this value-timestamp]
+    (let [will-complete (= (first value-timestamp) ::completed)]
+      (not (:completed (swap! a (fn [{:keys [completed queue] :as a}]
+                                  (if completed
+                                    a
+                                    (if will-complete
+                                      (assoc a :completed true)
+                                      (if (<= n (count queue))
+                                        (throw (IllegalStateException. (str "Cannot add more than " n " items to stream '" label "'")))
+                                        (assoc a :queue (conj queue value-timestamp)))))))))))
+  clojure.lang.IDeref
+  (deref [this]
+    (let [{:keys [queue last-value]} @a]
+      (or last-value (ffirst queue)))))
+
+
 
 (defn eventstream
   [n-agent label]
-  (React. (-> n-agent deref :id)
-          label
-          (atom [nil (System/currentTimeMillis)])
-          true
-          (atom false)
-          (atom false)))
-
-(defn eventstream?
-  [r]
-  (= (:eventstream? r) true))
+  (Eventstream. (-> n-agent deref :id)
+                label
+                (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
+                       :last-value nil
+                       :completed false})
+                3))
 
 
 ;; ---------------------------------------------------------------------------
@@ -549,8 +572,6 @@
                                          :last-value (first seq)}))))
   (available? [this]
     (-> seq-val-atom deref :seq seq))
-  (busy? [this]
-    true)
   (completed? [this]
     (-> seq-val-atom deref :seq nil?))
   (deliver! [r value-timestamp-pair]
@@ -700,6 +721,25 @@
               [reactive])))
 
 
+(defn rconcat
+  [& reactives]
+  (let [n-agent (-> reactives first network-id network-by-id)
+        rs (atom reactives)
+        new-r (eventstream n-agent "concat")]
+    (doseq [r reactives]
+      (add-link! n-agent (make-link "concat"
+                                    (fn [inputs outputs]
+                                      (let [r (first inputs)]
+                                        (if (= r (first @rs))
+                                          (if-let [next-r (if (completed? r)
+                                                            (first (swap! rs next))
+                                                            r)]
+                                            (if (available? next-r)
+                                              (make-result-map (consume! next-r) nil inputs outputs))))) )
+                                    [r] [new-r])))
+    new-r))
+
+
 (defn rbuffer
   [no reactive]
   (let [l (java.util.LinkedList.)]
@@ -788,11 +828,17 @@
 (def e1 (eventstream n "e1"))
 (def e2 (eventstream n "e2"))
 
-(def r (rmap + e1 e2))
-(subscribe #(println %) r)
+
+
+
+ (def c (rconcat e1 e2))
+ (subscribe println c)
+
+#_ (def r (rmap + e1 e2))
+#_ (subscribe #(println %) r)
 
 #_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
-#_ (subscribe #(println %)
+#_ (subscribe println
            (rmerge f e2))
 
 
@@ -826,10 +872,11 @@
                                    {:street "2"}
                                    {:street "3"}]})
 
-(def p (behavior n "p" nil))
+(def p (behavior n "p"))
 (def a (rmapcat :addresses p))
-(def pname (rhold (rmap :name p)))
-(def pair (rmap vector pname a))
+(def pname (rmap :name p))
+(def pnameb (rhold pname))
+(def pair (rmap vector pnameb a))
 (subscribe #(println "OUTPUT" %) pair)
 
 

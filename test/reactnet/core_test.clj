@@ -1,7 +1,7 @@
 (ns reactnet.core-test
   (:require [clojure.test :refer :all]
             [reactnet.core :as r])
-  (:import [reactnet.core SeqStream React]))
+  (:import [reactnet.core SeqStream Behavior Eventstream]))
 
 
 
@@ -12,12 +12,19 @@
 
 (defn behavior
   [label value]
-  (React. "" label (atom [value (r/now)]) false (atom false) (atom true)))
+  (Behavior. ""
+             label
+             (atom [value (r/now)])))
 
 
 (defn eventstream
   [label]
-  (React. "" label (atom [nil (r/now)]) true (atom false) (atom false)))
+  (Eventstream. ""
+                label
+                (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
+                       :last-value nil
+                       :completed false})
+                3))
 
 
 (defmacro link
@@ -77,15 +84,11 @@
         e2 (eventstream "e2")
         e3 (eventstream "e3")
         n (network (link identity [e1] [e2])
-                   (link identity [e2] [e3]))
-        n-after (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
+                   (link identity [e2] [e3]))]
+    (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
                      (map (partial apply rv))
                      (reduce r/propagate! n))
-        pending-values (reduce (fn [m [r [v t]]]
-                                 (update-in m [r] (comp vec conj) v))
-                               {}
-                               (:values n-after))]
-    (is (= {e3 [:bar :baz]} pending-values))
+    (is (= 3 (-> e3 :a deref :queue count)))
     (are [rs vs] (= (mapv deref rs) vs)
          [e1 e2 e3] [:baz :baz :foo])))
 
@@ -102,8 +105,6 @@
          (map (partial apply rv))
          (reduce r/propagate! n))
     (is (= [:foo :bar] @results))))
-
-
 
 
 (deftest mapcat-test
