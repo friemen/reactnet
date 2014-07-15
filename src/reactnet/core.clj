@@ -7,7 +7,7 @@
 ;; - Handle the initial state of the network
 ;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
-;; - Back pressure: limit max number of items in agents pending queue and stored values in network
+;; - Back pressure: limit max number of items in agents pending queue
 ;; - Add pause! and resume! for the network
 ;; - Graphviz visualization of the graph
 ;; - Support core.async
@@ -72,7 +72,7 @@
 ;; a Result map (see below) or nil, which denotes that the function has
 ;; not consumed any value.
 
-;; Error Handler function
+;; Error Handler function:
 ;; A function that takes the link and the Result map that the link function
 ;; returned. It may return a new Result map (see below) or nil.
 
@@ -94,9 +94,6 @@
 ;;  :level-map      Map {reactive -> topological-level} (derived)
 ;;  :links-map      Map {reactive -> Seq of links} (derived)
 
-;; Reactive Values:
-;; A map {reactive -> [[value timestamp]*]} containing for each
-;; reactive a vector of value-timestamp-pairs.
 
 
 ;; ---------------------------------------------------------------------------
@@ -392,7 +389,8 @@
   "From a seq of links, sorted ascending by level, evaluates all links
   in the same level as the first.  Returns a triple of a no-consume?
   flag, a seq of [r [v t]] pairs and a seq of links that were not
-  evaluated because they are not on higher levels."
+  evaluated because they are on a higher level. The flag no-consume?
+  is true if no link function consumed a value."
   [level-map links]
   (let [available-links  (->> links (filter ready?))
         level            (-> available-links first :level)
@@ -424,23 +422,24 @@
 
 
 (defn propagate!
-  "Executes one propagation cycle, returns the network."
+  "Executes one propagation cycle.
+  Returns the network."
   ([network pending-reactives]
      (propagate! network [] pending-reactives))
   ([{:keys [links-map level-map] :as network}
     pending-links
     pending-reactives]
      (dump "\nPROPAGATE" (apply str (repeat 50 "=")))
-     (let [links             (->> pending-reactives
-                                 (mapcat links-map)
-                                 (concat pending-links)
-                                 (sort-by :level (comparator <))
-                                 distinct)
-           _                 (dump-links links)
+     (let [links           (->> pending-reactives
+                                (mapcat links-map)
+                                (concat pending-links)
+                                (sort-by :level (comparator <))
+                                distinct)
+           _               (dump-links links)
            [no-consume?
             pending-links
-            current-rvs]     (eval-links! level-map links)
-           _                 (dump-values "VALUES" current-rvs)]
+            current-rvs]   (eval-links! level-map links)
+           _               (dump-values "VALUES" current-rvs)]
        (if no-consume?
          (assoc network :no-consume? true)
          (loop [n network
@@ -459,7 +458,8 @@
 
 (defn update-and-propagate!
   "Updates reactives with the contents of the reactive-values map,
-  and runs propagation cycles as long as values are consumed."
+  and runs propagation cycles as long as values are consumed. 
+  Returns the network."
   [{:keys [reactives] :as network} reactive-values]
   (propagate! network (update-reactive-values! reactive-values))
   (loop [n                 network
@@ -474,7 +474,8 @@
 
 (defn push!
   "Starts an update of a reactive and a propagation cycle in a
-  different thread using network agent's send-off. Returns the value."
+  different thread using network agent's send-off. 
+  Returns the value."
   ([reactive value]
      (push! reactive value (now)))
   ([reactive value timestamp]
