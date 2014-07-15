@@ -3,15 +3,15 @@
             [clojure.string :as s]))
 
 ;; TODOs
-;; - Create unit tests for cyclic deps
+;; - Create unit test for add/remove links to/from network
+;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
-;; - Add network modifying combinators like 'switch' or RxJava's 'flatMap' 
-;; - Make scheduler available in different ns, support at and at-fixed-rate 
-;; - Back pressure: limit max number of items in agents pending queue
 ;; - Add pause! and resume! for the network
 ;; - Graphviz visualization of the graph
 ;; - Support core.async
 ;; - Support interceptor?
+;; - Make scheduler available in different ns, support at and at-fixed-rate 
+;; - Back pressure: limit max number of items in agents pending queue
 
 ;; Ideas about completed state
 ;; - A reactive becomes obsolete if it is not part of any link.
@@ -68,12 +68,12 @@
 ;;                  (max level of all input reactives + 1)
 
 ;; Link function:
-;; A function that takes two args (input and output reactive) and returns
+;; A function that takes two args (input and output reactives) and returns
 ;; a Result map (see below) or nil, which denotes that the function has
 ;; not consumed any value.
 
 ;; Error Handler function:
-;; A function that takes the link and the Result map that the link function
+;; A function that takes the Link and the Result map that the link function
 ;; returned. It may return a new Result map (see below) or nil.
 
 ;; Result:
@@ -99,8 +99,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Factories
 
-(declare push!)
-
 (defn now
   []
   (System/currentTimeMillis))
@@ -113,54 +111,6 @@
    :inputs inputs
    :outputs outputs
    :level 0})
-
-
-(defn safely-apply
-  [f vs]
-  (try [(apply f vs) nil]
-       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
-
-
-(defn make-output-value-map
-  [value outputs]
-  (reduce (fn [m r] (assoc m r value)) {} outputs))
-
-
-(defn make-result-map
-  [value ex inputs outputs]
-  {:output-values (if-not ex (make-output-value-map value outputs))
-   :exception ex})
-
-
-(defn make-async-link-fn
-  [f result-fn]
-  (fn [inputs outputs]
-    (future (let [[result ex] (safely-apply f (map consume! inputs))
-                  result-map (result-fn result ex inputs outputs)]
-              (doseq [[r v] (:output-values result-map)]
-                (push! r v))))
-    {:output-values {}}))
-
-
-(defn make-sync-link-fn
-  ([f]
-     (make-sync-link-fn f make-result-map))
-  ([f result-fn]
-     (fn [inputs outputs]
-       (let [[result ex] (safely-apply f (map consume! inputs))]
-         (result-fn result ex inputs outputs)))))
-
-
-(defn async
-  [f]
-  {:async f})
-
-
-(defn unpack-fn
-  [fn-or-map]
-  (if-let [f (:async fn-or-map)]
-    [make-async-link-fn f]
-    [make-sync-link-fn fn-or-map]))
 
 
 (declare reactives-from-links
@@ -217,6 +167,7 @@
   [[r vs]]
   (str (:label r) ": [" (->> vs (map first) (s/join ", ")) "]"))
 
+
 (defn pp
   [n-agent]
   (let [links (:links @n-agent)
@@ -226,10 +177,7 @@
                      {}
                      (:values @n-agent))]
     (println (str "Reactives\n" (s/join "\n" (map str-react reactives))
-                  "\nLinks\n" (s/join "\n" (map str-link links))
-                  "\nPending\n" (s/join "\n" (map (fn [[r vs]]
-                                                    (str (:label r) " " vs))
-                                                  rvsm))))))
+                  "\nLinks\n" (s/join "\n" (map str-link links))))))
 
 (def debug? false)
 
@@ -384,6 +332,7 @@
   (and (every? available? inputs)
        (remove completed? outputs)))
 
+(declare push!)
 
 (defn- eval-links!
   "From a seq of links, sorted ascending by level, evaluates all links
@@ -398,7 +347,6 @@
         upstream?        (fn [[r _]]
                            (let [r-level (level-map r)]
                              (or (nil? r-level) (< r-level level))))
-        pending-links    (->> available-links (remove same-level?))
         eval-results     (->> available-links (filter same-level?) (map eval-link!) (remove nil?))
         no-consume?      (empty? eval-results)
         timestamp        (now)
@@ -409,12 +357,17 @@
                                         (if-not (sequential? ov)
                                           (seq ov)
                                           (mapcat seq ov))))
-                              (map (fn [[r v]] [r [v timestamp]])))]
+                              (map (fn [[r v]] [r [v timestamp]])))
+        remove-links     (->> eval-results (mapcat :remove-links) set)
+        add-links        (->> eval-results (mapcat :add-links) set)
+        pending-links    (->> available-links (remove same-level?) (remove remove-links))]
     ;; push value into next cycle if reactive level is either
     ;; unknown or is lower than current level
     (doseq [[r [v t]] (filter upstream? rvs)]
       (push! r v t))
     [no-consume?
+     remove-links
+     add-links
      pending-links
      (->> rvs
           (remove upstream?)
@@ -437,12 +390,17 @@
                                 distinct)
            _               (dump-links links)
            [no-consume?
+            remove-links
+            add-links
             pending-links
             current-rvs]   (eval-links! level-map links)
            _               (dump-values "VALUES" current-rvs)]
        (if no-consume?
          (assoc network :no-consume? true)
-         (loop [n network
+         (loop [n (->> network :links
+                       (remove remove-links)
+                       (concat add-links)
+                       (make-network (:id network)))
                 rvs current-rvs] ;; rvs is a sequence of reactive value pairs [r v]
            (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
                                                (if (rvm r)
@@ -461,12 +419,11 @@
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
   [{:keys [reactives] :as network} reactive-values]
-  (propagate! network (update-reactive-values! reactive-values))
-  (loop [n                 network
-         pending-reactives (->> reactives (filter pending?))]
+  (loop [n (propagate! network (update-reactive-values! reactive-values))
+         pending-reactives (->> n :reactives (filter pending?))]
     (let [next-n      (propagate! n pending-reactives)
           progress?   (not (:no-consume? next-n))
-          next-prs    (->> reactives (filter pending?))]
+          next-prs    (->> n :reactives (filter pending?))]
       (if (and progress? (seq next-prs))
         (recur next-n next-prs)
         n))))
@@ -639,6 +596,67 @@
 
 
 ;; ---------------------------------------------------------------------------
+;; Link function factories and execution
+
+(defn safely-apply
+  "Applies f to xs, but catches Exception instances.
+  Returns a pair of [result exception]."
+  [f xs]
+  (try [(apply f xs) nil]
+       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
+
+
+(defn make-output-value-map
+  [value outputs]
+  (reduce (fn [m r] (assoc m r value)) {} outputs))
+
+
+(defn make-result-map
+  [value ex inputs outputs]
+  {:output-values (if-not ex (make-output-value-map value outputs))
+   :exception ex})
+
+
+(defn make-async-link-fn
+  [f result-fn]
+  (fn [inputs outputs]
+    (future (let [[result ex] (safely-apply f (map consume! inputs))
+                  result-map (result-fn result ex inputs outputs)]
+              (doseq [[r v] (:output-values result-map)]
+                (push! r v))))
+    {:output-values {}}))
+
+
+(defn make-sync-link-fn
+  ([f]
+     (make-sync-link-fn f make-result-map))
+  ([f result-fn]
+     (fn [inputs outputs]
+       (let [[result ex] (safely-apply f (map consume! inputs))]
+         (result-fn result ex inputs outputs)))))
+
+
+(defn async
+  [f]
+  {:async f})
+
+
+(defn unpack-fn
+  [fn-or-map]
+  (if-let [f (:async fn-or-map)]
+    [make-async-link-fn f]
+    [make-sync-link-fn fn-or-map]))
+
+
+
+#_ (def b (rmap {:f foobar
+                 :link-fn-factory [sync, future, go]
+                 :result-fn (fn [])
+                 :error-handler (fn []) }))
+
+
+
+;; ---------------------------------------------------------------------------
 ;; More constructors of reactives
 
 (defn rsample
@@ -762,6 +780,20 @@
     new-r))
 
 
+(defn rswitch
+  [reactive]
+  (let [n-agent (-> reactive network-id network-by-id)
+        new-r   (eventstream n-agent "switch")]
+    (add-link! n-agent
+               (make-link "switcher"
+                          (fn [inputs outputs]
+                            (let [r (-> inputs first consume!)]
+                              {:remove-links (filter #(= (:outputs %) [new-r]) (:links @n-agent))
+                               :add-links [(make-link "switch" (make-sync-link-fn identity) [r] [new-r])]}))
+                          [reactive] []))
+    new-r))
+
+
 (defn rbuffer
   [no reactive]
   (let [l (java.util.LinkedList.)]
@@ -847,21 +879,29 @@
 
 (defnetwork n)
 
-(comment)
+(comment
+  (def e1 (eventstream n "e1"))
+  (def e2 (eventstream n "e2"))
+
+  (def c (rconcat e1 e2))
+  (def results (atom []))
+  (subscribe (partial swap! results conj) c)
+
+  #_ (do
+       (push! e2 :bar1)
+       (push! e2 :bar2)
+       (push! e2 :bar3)
+       (push! e2 :bar4)
+       (push! e1 :foo)
+       (push! e1 ::completed)))
+
+
 (def e1 (eventstream n "e1"))
 (def e2 (eventstream n "e2"))
+(def s (eventstream n "s"))
+(def switched (rswitch s))
+(subscribe println switched)
 
-(def c (rconcat e1 e2))
-(def results (atom []))
-(subscribe (partial swap! results conj) c)
-
-#_ (do
-(push! e2 :bar1)
-(push! e2 :bar2)
-(push! e2 :bar3)
-(push! e2 :bar4)
-(push! e1 :foo)
-(push! e1 ::completed))
 
 
 #_ (def r (rmap + e1 e2))
@@ -897,18 +937,16 @@
     (push! x i))
   (->> x+y (rdelay 3000) (subscribe #(println %))))
 
-(comment)
-(def data {:name "bar" :addresses [{:street "1"}
-                                   {:street "2"}
-                                   {:street "3"}]})
+(comment
+  (def data {:name "bar" :addresses [{:street "1"}
+                                     {:street "2"}
+                                     {:street "3"}]})
 
-(def p (behavior n "p"))
-(def a (rmapcat :addresses p))
-(def pname (rmap :name p))
-(def pnameb (rhold pname))
-(def pair (rmap vector pnameb a))
-(subscribe #(println "OUTPUT" %) pair)
-
-
+  (def p (behavior n "p"))
+  (def a (rmapcat :addresses p))
+  (def pname (rmap :name p))
+  (def pnameb (rhold pname))
+  (def pair (rmap vector pnameb a))
+  (subscribe #(println "OUTPUT" %) pair))
 
 :ok
