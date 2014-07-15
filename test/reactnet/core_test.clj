@@ -14,7 +14,8 @@
   [label value]
   (Behavior. ""
              label
-             (atom [value (r/now)])))
+             (atom [value (r/now)])
+             (atom true)))
 
 
 (defn eventstream
@@ -24,7 +25,7 @@
                 (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
-                3))
+                10))
 
 
 (defmacro link
@@ -47,7 +48,7 @@
         y (behavior "y" 2)
         z (behavior "z" 0)
         n (network (link + [x y] [z]))]
-    (r/propagate! n (merge (rv x 2) (rv y 3)))
+    (r/update-and-propagate! n (merge (rv x 2) (rv y 3)))
     (are [rs vs] (= (mapv deref rs) vs)
          [x y z] [2 3 5])))
 
@@ -62,7 +63,7 @@
                    (link (partial swap! results conj) [z] []))]
     (->> (range 1 11)
          (map (partial rv x))
-         (reduce r/propagate! n))
+         (reduce r/update-and-propagate! n))
     (is (= @results [3 8 15 24 35 48 63 80 99 120]))))
 
 
@@ -73,24 +74,45 @@
         sums (atom [])
         n (network (link + [e1 e2] [r])
                    (link (partial swap! sums conj) [r] []))]
-    (r/propagate! n (rv e1 1))
+    (r/update-and-propagate! n (rv e1 1))
     (is (nil? @r))
-    (r/propagate! n (rv e2 1))
+    (r/update-and-propagate! n (rv e2 1))
     (is (= 2 @r))))
 
 
-(deftest pending-values-test
+(deftest queuing-test
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
         e3 (eventstream "e3")
         n (network (link identity [e1] [e2])
                    (link identity [e2] [e3]))]
     (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
-                     (map (partial apply rv))
-                     (reduce r/propagate! n))
+         (map (partial apply rv))
+         (reduce r/update-and-propagate! n))
     (is (= 3 (-> e3 :a deref :queue count)))
     (are [rs vs] (= (mapv deref rs) vs)
          [e1 e2 e3] [:baz :baz :foo])))
+
+
+(deftest consume-queued-values-test
+  (let [results (atom [])
+        pass? (atom false)
+        e1 (eventstream "e1")
+        n (network (r/make-link "collect"
+                                (fn [inputs outputs]
+                                  (when @pass?
+                                    (swap! results conj (-> inputs first r/consume!))
+                                    {}))
+                                [e1] []))]
+    (->> [[e1 :foo] [e1 :bar]]
+         (map (partial apply rv))
+         (reduce r/update-and-propagate! n))
+    (is (= [] @results))
+    (is (r/pending? e1))
+    (reset! pass? true)
+    (r/update-and-propagate! n (rv e1 :baz))
+    (is (= [:foo :bar :baz] @results))
+    (is (not (r/pending? e1)))))
 
 
 (deftest merge-test
@@ -103,7 +125,7 @@
                    (link (partial swap! results conj) [m] []))]
     (->> [[e1 :foo] [e2 :bar]]
          (map (partial apply rv))
-         (reduce r/propagate! n))
+         (reduce r/update-and-propagate! n))
     (is (= [:foo :bar] @results))))
 
 
@@ -123,6 +145,6 @@
                    (link name [e2] [e3])
                    (link vector [numbers e3] [e4])
                    (link (partial swap! results conj) [e4] []))]
-    (r/propagate! n (rv e1 {:items [:foo :bar :baz]}))
+    (r/update-and-propagate! n (rv e1 {:items [:foo :bar :baz]}))
     (is (= [[0 "foo"] [1 "bar"] [2 "baz"]] @results))))
 
