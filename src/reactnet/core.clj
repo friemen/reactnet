@@ -3,6 +3,9 @@
             [clojure.string :as s]))
 
 ;; TODOs
+;; - complete-fn returns a Result map which must be handled properly in propagate!
+;; - re-creation of the network must preserve foreign keys
+;; - Automatically complete derived reactives where no link outputs points to
 ;; - Create unit test for add/remove links to/from network
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
@@ -24,7 +27,7 @@
 ;; Ideas about error handling
 ;; - An exception is thrown by custom functions invoked from a link
 ;;   function
-;; - A link contains an error-handler function
+;; - A link contains an error-fn function
 ;; - It should support features like 'return', 'retry', 'resume', 'ignore'
 ;; - It should allow redirection of an exception to a specific eventstream
 ;; - A retry would push! the same values again
@@ -59,13 +62,15 @@
 
 ;; Link:
 ;; A map that combines m input reactives, n output reactives and a link function f.
-;;  :label          Label for pretty printing
-;;  :inputs         Input reactives
-;;  :outputs        Output reactives
-;;  :f              A link function (see below)
-;;  :error-handler  An error handler function
-;;  :level          The level within the reactive network
-;;                  (max level of all input reactives + 1)
+;;  :label            Label for pretty printing
+;;  :inputs           Input reactives
+;;  :outputs          Output reactives
+;;  :f                A link function (see below)
+;;  :error-fn         An error handler function [result ex -> Result]
+;;  :complete-fn      A function [reactive -> nil] called when one of the
+;;                    input reactives becomes completed 
+;;  :level            The level within the reactive network
+;;                    (max level of all input reactives + 1)
 
 ;; Link function:
 ;; A function that takes two args (input and output reactives) and returns
@@ -88,12 +93,11 @@
 
 ;; Network:
 ;; A map containing
-;;  :id             A string containing the fqn of the agent var
-;;  :links          Collection of links
-;;  :reactives      Set of reactives (derived)
-;;  :level-map      Map {reactive -> topological-level} (derived)
-;;  :links-map      Map {reactive -> Seq of links} (derived)
-
+;;  :id               A string containing the fqn of the agent var
+;;  :links            Collection of links
+;;  :reactives        Set of reactives (derived)
+;;  :level-map        Map {reactive -> topological-level} (derived)
+;;  :links-map        Map {reactive -> Seq of links} (derived)
 
 
 ;; ---------------------------------------------------------------------------
@@ -105,12 +109,17 @@
 
 
 (defn make-link
-  [label f inputs outputs]
-  {:label label
-   :f f
-   :inputs inputs
-   :outputs outputs
-   :level 0})
+  ([label f inputs outputs]
+     (make-link label f inputs outputs nil))
+  ([label f inputs outputs options-map]
+     (merge {:label label
+             :f f
+             :inputs inputs
+             :outputs outputs
+             :error-fn nil
+             :complete-fn nil
+             :level 0}
+            options-map)))
 
 
 (declare reactives-from-links
@@ -145,12 +154,12 @@
 
 (defn str-react
   [r]
-  (str (:label r) ":" (get-value r)))
+  (str (if (completed? r) "C " "  ") (:label r) ":" (pr-str (get-value r))))
 
 
 (defn str-link  
   [l]
-  (str "L" (:level l)
+  (str "  L" (:level l)
        " [" (s/join " " (map :label (:inputs l)))
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
@@ -216,13 +225,14 @@
 
 
 (defn reactive-links-map
-  "Returns a map {reactive -> (Seq of links)}."
+  "Returns a map {reactive -> (Seq of links)}, where the reactive is
+  an input of the links it points to."
   [links]
   (->> links
-       (mapcat (fn [{:keys [inputs outputs] :as link}]
-                 (for [i inputs] [i link])))
-       (reduce (fn [m [i link]]
-                 (update-in m [i] conj link))
+       (mapcat (fn [{:keys [inputs] :as link}]
+                 (for [r inputs] [r link])))
+       (reduce (fn [m [r link]]
+                 (update-in m [r] conj link))
                {})))
 
 
@@ -273,12 +283,36 @@
           rv-pairs))
 
 
+(defn ready?
+  "Returns true for a link if
+  - all inputs are available,
+  - at least one output is not completed."
+  [{:keys [inputs outputs]}]
+  (and (every? available? inputs)
+       (remove completed? outputs)))
+
+
+(defn dead?
+  "Returns true for a link if none of it's inputs is completed."
+  [{:keys [inputs]}]
+  (some completed? inputs))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Modifying the network
 
 (defn- add-link
   [{:keys [id links]} link]
   (make-network id (conj links link)))
+
+
+(defn- cleanup
+  "Removes all links from the network that have at least one input
+  in completed state."
+  [{:keys [id links]}]
+  (->> links
+       (filter #(not-any? completed? (:inputs %)))
+       (make-network id)))
 
 
 (defn add-link!
@@ -291,12 +325,12 @@
 
 
 (defn- handle-exception!
-  "Invokes the links error-handler function, or prints stacktrace if
-  the link has no error-handler."
-  [{:keys [error-handler] :as link} {:keys [exception] :as result}]
+  "Invokes the links error-fn function, or prints stacktrace if
+  the link has no error-fn."
+  [{:keys [error-fn] :as link} {:keys [exception] :as result}]
   (when exception
-    (if error-handler
-      (error-handler link result)
+    (if error-fn
+      (error-fn link result)
       (.printStackTrace exception))))
 
 
@@ -324,13 +358,6 @@
       (merge inputs result error-result))))
 
 
-(defn- ready?
-  "Returns true for a link if
-  - all inputs are available
-  - at least one output is not completed"
-  [{:keys [inputs outputs]}]
-  (and (every? available? inputs)
-       (remove completed? outputs)))
 
 (declare push!)
 
@@ -342,6 +369,7 @@
   is true if no link function consumed a value."
   [level-map links]
   (let [available-links  (->> links (filter ready?))
+        dead-links       (->> links (filter dead?))
         level            (-> available-links first :level)
         same-level?      (fn [l] (= (:level l) level))
         upstream?        (fn [[r _]]
@@ -358,7 +386,7 @@
                                           (seq ov)
                                           (mapcat seq ov))))
                               (map (fn [[r v]] [r [v timestamp]])))
-        remove-links     (->> eval-results (mapcat :remove-links) set)
+        remove-links     (->> eval-results (mapcat :remove-links) (concat dead-links) set)
         add-links        (->> eval-results (mapcat :add-links) set)
         pending-links    (->> available-links (remove same-level?) (remove remove-links))]
     ;; push value into next cycle if reactive level is either
@@ -440,6 +468,16 @@
                update-and-propagate!
                {reactive [value timestamp]})
      value))
+
+
+(defn complete!
+  "Delivers the ::completed value into a reactive and notifies the complete-fn
+  handler of links that the reactive is an input of."
+  [reactive]
+  (deliver! reactive [::completed (now)])
+  (doseq [l (-> reactive network-id network-by-id :links-map (get reactive))]
+    (if-let [f (:complete-fn l)]
+      (f reactive))))
 
 
 ;; ===========================================================================
@@ -622,6 +660,7 @@
   (fn [inputs outputs]
     (future (let [[result ex] (safely-apply f (map consume! inputs))
                   result-map (result-fn result ex inputs outputs)]
+              ;; TODO also handle add/remove links
               (doseq [[r v] (:output-values result-map)]
                 (push! r v))))
     {:output-values {}}))
@@ -652,7 +691,35 @@
 #_ (def b (rmap {:f foobar
                  :link-fn-factory [sync, future, go]
                  :result-fn (fn [])
-                 :error-handler (fn []) }))
+                 :error-fn (fn []) }))
+
+
+;; ---------------------------------------------------------------------------
+;; Queue to be used with an atom or agent
+
+(defn make-queue
+  [max-size]
+  {:queue (clojure.lang.PersistentQueue/EMPTY)
+   :dequeued []
+   :max-size max-size})
+
+
+(defn- enqueue [{:keys [queue dequeued max-size] :as q} v]
+  (assoc q :queue
+         (conj (if (>= (count queue) max-size)
+                 (pop queue)
+                 queue)
+               v)))
+
+
+(defn- dequeue [{:keys [queue dequeued] :as q}]
+  (if-let [v (first queue)]
+    (assoc q
+      :queue (pop queue)
+      :dequeued [v])
+    (assoc q
+      :dequeued [])))
+
 
 
 
@@ -703,6 +770,29 @@
                 "map"
                 (make-link-fn f make-result-map)
                 reactives)))
+
+;; TODO
+(defn rmapcat'
+  [f reactive]
+  (let [[make-link-fn f] (unpack-fn f)
+        n-agent          (-> reactive network-id network-by-id)
+        new-r            (eventstream n-agent "mapcat'")
+        queue-atom       (atom [])
+        complete-fn      (fn [r]
+                           (let [current (first @queue-atom)
+                                 new-current (first (swap! queue-atom #(->> % (remove completed?) vec)))]
+                             (if (not= current new-current)
+                               nil ;; NOW CHANGE THE LINKS
+                               )))]
+    (derive-new eventstream
+                "mapcat'"
+                (make-link-fn f
+                              (fn [result ex inputs outputs]
+                                (swap! queue-atom enqueue result)
+                                
+                                #_ {:add-links [(make-link "" (make-sync-link-fn identity) [result] [new-r]
+                                                           {:complete-fn complete-fn})]})
+                              [reactive] []))))
 
 
 (defn rmapcat
@@ -828,30 +918,6 @@
                     (swap! tasks assoc output
                            (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
                 [reactive])))
-
-
-(defn make-queue
-  [max-size]
-  {:queue (clojure.lang.PersistentQueue/EMPTY)
-   :dequeued []
-   :max-size max-size})
-
-
-(defn- enqueue [{:keys [queue dequeued max-size] :as q} v]
-  (assoc q :queue
-         (conj (if (>= (count queue) max-size)
-                 (pop queue)
-                 queue)
-               v)))
-
-
-(defn- dequeue [{:keys [queue dequeued] :as q}]
-  (if-let [v (first queue)]
-    (assoc q
-      :queue (pop queue)
-      :dequeued [v])
-    (assoc q
-      :dequeued [])))
 
 
 (defn rthrottle
