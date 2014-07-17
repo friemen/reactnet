@@ -298,10 +298,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Modifying the network
 
-(defn- add-link
-  [{:keys [id links]} link]
-  (make-network id (conj links link)))
-
 
 (defn- rebuild
   "Takes a network and a set of links and re-calculates reactives,
@@ -315,6 +311,13 @@
       :links leveled-links
       :links-map (reactive-links-map leveled-links)
       :level-map level-map)))
+
+
+(defn- add-link
+  "Conjoins a link to the networks links and rebuilds it. Returns a
+  new network."
+  [{:keys [links] :as n} link]
+  (rebuild n (conj links link)))
 
 
 (defn- update-from-results
@@ -348,7 +351,7 @@
   (let [results  (for [r (->> links
                               (mapcat :inputs)
                               set
-                              (filter completed?)),
+                              (filter completed?))
                        f (->> r links-map
                               (map :complete-fn)) :when f]
                    (f r))]
@@ -356,6 +359,7 @@
 
 
 (defn add-link!
+  "Asynchronously adds a link to the network."
   [n-agent link]
   (send-off n-agent add-link link))
 
@@ -398,8 +402,23 @@
       (merge inputs result error-result))))
 
 
+(defn- extract-values
+  "Takes a sequence of Result maps and returns a seq of [r [v t]]
+  pairs."
+  [results]
+  (let [timestamp (now)]
+    (->> results
+         (map :output-values)
+         (remove nil?)
+         (mapcat (fn [ov]
+                   (if-not (sequential? ov)
+                     (seq ov)
+                     (mapcat seq ov))))
+         (map (fn [[r v]] [r [v timestamp]])))))
 
-(declare push!)
+
+
+(declare push! propagate-downstream!)
 
 
 (defn propagate!
@@ -431,24 +450,19 @@
                                 (map eval-link!)
                                 (remove nil?))
            no-consume?     (empty? results)
+           
+           ;; process Result maps 
+           ;; *-rvs is a sequence of reactive value pairs [r [v t]]
+           all-rvs         (extract-values results)
+           _               (dump-values "VALUES" all-rvs)
            upstream?       (fn [[r _]]
                              (let [r-level (level-map r)]
                                (or (nil? r-level) (< r-level level))))
-           timestamp       (now)
-           ;; *-rvs is a sequence of reactive value pairs [r [v t]]
-           all-rvs         (->> results
-                                (map :output-values)
-                                (remove nil?)
-                                (mapcat (fn [ov]
-                                          (if-not (sequential? ov)
-                                            (seq ov)
-                                            (mapcat seq ov))))
-                                (map (fn [[r v]] [r [v timestamp]])))
-           _               (dump-values "VALUES" all-rvs)
            downstream-rvs  (->> all-rvs
                                 (remove upstream?)
                                 (sort-by (comp level-map first) (comparator <)))
            upstream-rvs    (->> all-rvs (filter upstream?))
+           ;; apply network changes returned by link function invocations
            network         (update-from-results network results)]
        
        ;; TODO figure out reactives that are not used any more and
@@ -461,18 +475,24 @@
     
        (if no-consume?
          (assoc network :no-consume? true)
-         (loop [n network
-                rvs downstream-rvs] 
-           (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
-                                               (if (rvm r)
-                                                 [rvm (conj remaining [r vt])]
-                                                 [(assoc rvm r vt) remaining]))
-                                             [{} []]
-                                             rvs)]
-             (if (seq rvm)
-               (recur (propagate! n pending-links (update-reactive-values! rvm))
-                      remaining-rvs)
-               (dissoc n :no-consume?))))))))
+         (propagate-downstream! network pending-links downstream-rvs)))))
+
+
+(defn- propagate-downstream!
+  "Propagate reactive values that are guaranteed to be downstream."
+  [network pending-links downstream-rvs]
+  (loop [n network
+         rvs downstream-rvs] 
+    (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
+                                        (if (rvm r)
+                                          [rvm (conj remaining [r vt])]
+                                          [(assoc rvm r vt) remaining]))
+                                      [{} []]
+                                      rvs)]
+      (if (seq rvm)
+        (recur (propagate! n pending-links (update-reactive-values! rvm))
+               remaining-rvs)
+        (dissoc n :no-consume?)))))
 
 
 (defn update-and-propagate!
