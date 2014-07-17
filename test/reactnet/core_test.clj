@@ -89,7 +89,8 @@
     (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
          (map (partial apply rv))
          (reduce r/update-and-propagate! n))
-    (is (= 3 (-> e3 :a deref :queue count)))
+    (is (= [:foo :bar :baz]
+           (->> e3 :a deref :queue seq (mapv first))))
     (are [rs vs] (= (mapv deref rs) vs)
          [e1 e2 e3] [:baz :baz :foo])))
 
@@ -129,7 +130,7 @@
     (is (= [:foo :bar] @results))))
 
 
-(deftest mapcat-test
+(deftest many-output-values-test
   (let [results (atom [])
         e1 (eventstream "e1")
         e2 (eventstream "e2")
@@ -148,3 +149,17 @@
     (r/update-and-propagate! n (rv e1 {:items [:foo :bar :baz]}))
     (is (= [[0 "foo"] [1 "bar"] [2 "baz"]] @results))))
 
+
+(deftest add-remove-links-test
+  (let [e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        e3 (eventstream "e2")
+        l2 (link identity [e2] [e3])
+        l1 (r/make-link "add-remove" (fn [inputs outputs]
+                                       {:add [l2]
+                                        :remove-by #(= (:outputs %) [e2])})
+                        [e1] [e2])
+        n (network l1)
+        n-after (r/update-and-propagate! n (rv e1 :foo))]
+    (is (= 1 (-> n-after :links count)))
+    (is (= (:label l2) (-> n-after :links first :label)))))

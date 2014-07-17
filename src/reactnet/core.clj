@@ -1,6 +1,7 @@
 (ns reactnet.core
   (:require [clojure.set :refer [union]]
-            [clojure.string :as s]))
+            [clojure.string :as s])
+  (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
 ;; - complete-fn returns a Result map which must be handled properly in propagate!
@@ -88,8 +89,9 @@
 ;;                    each output reactive, or a vector containing of such
 ;;                    maps, i.e. {reactive -> [value*]}.                    
 ;;  :exception        Exception, or nil if output-values is valid
-;;  :add-links        A seq of links to be added to the network
-;;  :remove-links     A seq of links to be removed from the network
+;;  :add              A seq of links to be added to the network
+;;  :remove-by        A predicate that matches links to be removed
+;;                    from the network
 
 ;; Network:
 ;; A map containing
@@ -293,7 +295,7 @@
 
 
 (defn dead?
-  "Returns true for a link if none of it's inputs is completed."
+  "Returns true for a link if at least of it's inputs is completed."
   [{:keys [inputs]}]
   (some completed? inputs))
 
@@ -361,46 +363,6 @@
 
 (declare push!)
 
-(defn- eval-links!
-  "From a seq of links, sorted ascending by level, evaluates all links
-  in the same level as the first.  Returns a triple of a no-consume?
-  flag, a seq of [r [v t]] pairs and a seq of links that were not
-  evaluated because they are on a higher level. The flag no-consume?
-  is true if no link function consumed a value."
-  [level-map links]
-  (let [available-links  (->> links (filter ready?))
-        dead-links       (->> links (filter dead?))
-        level            (-> available-links first :level)
-        same-level?      (fn [l] (= (:level l) level))
-        upstream?        (fn [[r _]]
-                           (let [r-level (level-map r)]
-                             (or (nil? r-level) (< r-level level))))
-        eval-results     (->> available-links (filter same-level?) (map eval-link!) (remove nil?))
-        no-consume?      (empty? eval-results)
-        timestamp        (now)
-        rvs              (->> eval-results
-                              (map :output-values)
-                              (remove nil?)
-                              (mapcat (fn [ov]
-                                        (if-not (sequential? ov)
-                                          (seq ov)
-                                          (mapcat seq ov))))
-                              (map (fn [[r v]] [r [v timestamp]])))
-        remove-links     (->> eval-results (mapcat :remove-links) (concat dead-links) set)
-        add-links        (->> eval-results (mapcat :add-links) set)
-        pending-links    (->> available-links (remove same-level?) (remove remove-links))]
-    ;; push value into next cycle if reactive level is either
-    ;; unknown or is lower than current level
-    (doseq [[r [v t]] (filter upstream? rvs)]
-      (push! r v t))
-    [no-consume?
-     remove-links
-     add-links
-     pending-links
-     (->> rvs
-          (remove upstream?)
-          (sort-by (comp level-map first) (comparator <)))]))
-
 
 (defn propagate!
   "Executes one propagation cycle.
@@ -410,26 +372,63 @@
   ([{:keys [links-map level-map] :as network}
     pending-links
     pending-reactives]
-     (dump "\nPROPAGATE" (apply str (repeat 50 "=")))
+     (dump "\n= PROPAGATE" (apply str (repeat 49 "=")))
      (let [links           (->> pending-reactives
                                 (mapcat links-map)
                                 (concat pending-links)
                                 (sort-by :level (comparator <))
                                 distinct)
            _               (dump-links links)
-           [no-consume?
-            remove-links
-            add-links
-            pending-links
-            current-rvs]   (eval-links! level-map links)
-           _               (dump-values "VALUES" current-rvs)]
+           available-links (->> links (filter ready?))
+           level           (-> available-links first :level)
+           same-level?     (fn [l] (= (:level l) level))
+           results         (->> available-links
+                                (filter same-level?)
+                                (map eval-link!)
+                                (remove nil?))
+           dead-links      (->> links (filter dead?))
+           upstream?       (fn [[r _]]
+                             (let [r-level (level-map r)]
+                               (or (nil? r-level) (< r-level level))))
+           no-consume?     (empty? results)
+           timestamp       (now)
+           ;; *-rvs is a sequence of reactive value pairs [r [v t]]
+           all-rvs         (->> results
+                                (map :output-values)
+                                (remove nil?)
+                                (mapcat (fn [ov]
+                                          (if-not (sequential? ov)
+                                            (seq ov)
+                                            (mapcat seq ov))))
+                                (map (fn [[r v]] [r [v timestamp]])))
+           _               (dump-values "VALUES" all-rvs)
+           downstream-rvs  (->> all-rvs
+                                (remove upstream?)
+                                (sort-by (comp level-map first) (comparator <)))
+           upstream-rvs    (->> all-rvs (filter upstream?))   
+           remove-links    (->> results
+                                (map :remove-by)
+                                (remove nil?)
+                                (reduce (fn [ls pred]
+                                          (->> network :links (filter pred) (concat ls)))
+                                        dead-links)
+                                set)
+           add-links       (->> results (mapcat :add) set)
+           pending-links   (->> available-links (remove same-level?))
+           new-network     (->> network :links
+                                (remove remove-links)
+                                (concat add-links)
+                                (make-network (:id network)))]
+       
+       ;; push value into next cycle if reactive level is either
+       ;; unknown or is lower than current level
+       (doseq [[r [v t]] upstream-rvs]
+         (push! r v t))
+    
        (if no-consume?
          (assoc network :no-consume? true)
-         (loop [n (->> network :links
-                       (remove remove-links)
-                       (concat add-links)
-                       (make-network (:id network)))
-                rvs current-rvs] ;; rvs is a sequence of reactive value pairs [r v]
+         (loop [n new-network
+                rvs downstream-rvs] 
            (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
                                                (if (rvm r)
                                                  [rvm (conj remaining [r vt])]
@@ -439,7 +438,7 @@
              (if (seq rvm)
                (recur (propagate! n pending-links (update-reactive-values! rvm))
                       remaining-rvs)
-               (dissoc n no-consume?))))))))
+               (dissoc n :no-consume?))))))))
 
 
 (defn update-and-propagate!
@@ -572,7 +571,7 @@
   [n-agent label]
   (Eventstream. (-> n-agent deref :id)
                 label
-                (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
+                (atom {:queue (PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
                 10))
@@ -699,7 +698,7 @@
 
 (defn make-queue
   [max-size]
-  {:queue (clojure.lang.PersistentQueue/EMPTY)
+  {:queue (PersistentQueue/EMPTY)
    :dequeued []
    :max-size max-size})
 
@@ -878,7 +877,7 @@
                (make-link "switcher"
                           (fn [inputs outputs]
                             (let [r (-> inputs first consume!)]
-                              {:remove-links (filter #(= (:outputs %) [new-r]) (:links @n-agent))
+                              {:remove-links [#(= (:outputs %) [new-r])]
                                :add-links [(make-link "switch" (make-sync-link-fn identity) [r] [new-r])]}))
                           [reactive] []))
     new-r))
