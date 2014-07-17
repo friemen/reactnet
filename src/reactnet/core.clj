@@ -4,6 +4,8 @@
   (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
+;; - How to detect a reactive that becomes silently completed?
+;;   It is important to call the complete-fn once and only once!
 ;; - Automatically complete derived reactives where no link outputs points to
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
@@ -329,12 +331,28 @@
                                             (filter pred)
                                             (into ls)))
                                      (set dead-links)))
-        add-links       (->> results (mapcat :add) set)
-        new-network     (->> n :links
-                             (remove remove-links)
-                             (concat add-links)
-                             (rebuild n))]
-    new-network))
+        add-links       (->> results (mapcat :add) set)]
+    (if (or (seq add-links) (seq remove-links))
+      (->> n :links
+           (remove remove-links)
+           (concat add-links)
+           (rebuild n))
+      n)))
+
+
+(defn- remove-completed
+  "Detects all completed input reactives, calls complete-fn for each
+  link and returns a network updated with the results of the
+  complete-fn invocations."
+  [{:keys [reactives links links-map] :as n}]
+  (let [results  (for [r (->> links
+                              (mapcat :inputs)
+                              set
+                              (filter completed?)),
+                       f (->> r links-map
+                              (map :complete-fn)) :when f]
+                   (f r))]
+    (update-from-results n results)))
 
 
 (defn add-link!
@@ -387,13 +405,16 @@
 (defn propagate!
   "Executes one propagation cycle.
   Returns the network."
+  ([network]
+     (propagate! network [] []))
   ([network pending-reactives]
      (propagate! network [] pending-reactives))
-  ([{:keys [links-map level-map] :as network}
-    pending-links
-    pending-reactives]
+  ([network pending-links pending-reactives]
      (dump "\n= PROPAGATE" (apply str (repeat 49 "=")))
-     (let [links           (->> pending-reactives
+     (let [network         (remove-completed network)
+           links-map       (:links-map network)
+           level-map       (:level-map network)
+           links           (->> pending-reactives
                                 (mapcat links-map)
                                 (concat pending-links)
                                 (sort-by :level (comparator <))
@@ -428,7 +449,7 @@
                                 (remove upstream?)
                                 (sort-by (comp level-map first) (comparator <)))
            upstream-rvs    (->> all-rvs (filter upstream?))
-           new-network     (update-from-results network results)]
+           network         (update-from-results network results)]
        
        ;; TODO figure out reactives that are not used any more and
        ;; complete them, if they were derived by the network itself
@@ -439,8 +460,8 @@
          (push! r v t))
     
        (if no-consume?
-         (assoc new-network :no-consume? true)
-         (loop [n new-network
+         (assoc network :no-consume? true)
+         (loop [n network
                 rvs downstream-rvs] 
            (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
                                                (if (rvm r)
@@ -486,14 +507,7 @@
   the reactive and returns an updated network."
   [{:keys [links-map] :as n} reactive]
   (deliver! reactive [::completed (now)])
-  (let [links (links-map reactive)
-        results (->> links 
-                     (map :complete-fn)
-                     (remove nil?)
-                     (reduce (fn [rs f]
-                               (conj rs (f reactive)))
-                             []))]
-    (update-from-results n results)))
+  (update-and-propagate! n nil))
 
 
 (defn complete!
