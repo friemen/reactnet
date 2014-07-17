@@ -4,10 +4,7 @@
   (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
-;; - complete-fn returns a Result map which must be handled properly in propagate!
-;; - re-creation of the network must preserve foreign keys
 ;; - Automatically complete derived reactives where no link outputs points to
-;; - Create unit test for add/remove links to/from network
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
 ;; - Add pause! and resume! for the network
@@ -17,13 +14,13 @@
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
 ;; - Back pressure: limit max number of items in agents pending queue
 
+
 ;; Ideas about completed state
-;; - A reactive becomes obsolete if it is not part of any link.
-;; - Completed does no apply to behaviours, but it is a general concept
+;; - A reactive becomes obsolete if it was created by the network but is no
+;;   longer referenced by a link of that network.
 ;; - A completed reactive must not receive any outputs -> remove it from links :outputs.
-;; - A link with one completed input is 'dead'
-;; - A link with only completed outputs is 'dead'
 ;; - Derived reactives become completed when all links delivering to them are dead.
+
 
 ;; Ideas about error handling
 ;; - An exception is thrown by custom functions invoked from a link
@@ -124,20 +121,12 @@
             options-map)))
 
 
-(declare reactives-from-links
-         reactive-links-map
-         reactive-level-map)
+(declare rebuild)
 
 
 (defn make-network
   [id links]
-  (let [level-map (reactive-level-map links)
-        leveled-links (map #(assoc % :level (level-map %)) links)]
-    {:id id
-     :reactives (reactives-from-links leveled-links)
-     :links leveled-links
-     :links-map (reactive-links-map leveled-links)
-     :level-map level-map}))
+  (rebuild {:id id} links))
 
 
 (defmacro defnetwork
@@ -181,6 +170,7 @@
 
 (defn pp
   [n-agent]
+  {:pre [(instance? clojure.lang.IRef n-agent)]}
   (let [links (:links @n-agent)
         reactives (:reactives @n-agent)
         rvsm (reduce (fn [m [r [v t]]]
@@ -295,9 +285,12 @@
 
 
 (defn dead?
-  "Returns true for a link if at least of it's inputs is completed."
-  [{:keys [inputs]}]
-  (some completed? inputs))
+  "Returns true for a link if at least of it's inputs is completed or
+  all outputs are completed."
+  [{:keys [inputs outputs]}]
+  (or (empty? inputs)
+      (some completed? inputs)
+      (and (seq outputs) (every? completed? outputs))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -308,13 +301,40 @@
   (make-network id (conj links link)))
 
 
-(defn- cleanup
-  "Removes all links from the network that have at least one input
-  in completed state."
-  [{:keys [id links]}]
-  (->> links
-       (filter #(not-any? completed? (:inputs %)))
-       (make-network id)))
+(defn- rebuild
+  "Takes a network and a set of links and re-calculates reactives,
+  links-map and level-map. Preserves other existing entries. Returns a
+  new network."
+  [{:keys [id] :as n} links]
+  (let [level-map (reactive-level-map links)
+        leveled-links (map #(assoc % :level (level-map %)) links)]
+    (assoc n
+      :reactives (reactives-from-links leveled-links)
+      :links leveled-links
+      :links-map (reactive-links-map leveled-links)
+      :level-map level-map)))
+
+
+(defn- update-from-results
+  "Takes a network and a seq of result maps and returns an updated
+  network, with added and removed links."
+  [{:keys [links] :as n} results]
+  (let [dead-links      (->> links
+                             (filter dead?))
+        remove-links    (->> results
+                             (map :remove-by)
+                             (remove nil?)
+                             (reduce (fn [ls pred]
+                                       (->> n :links
+                                            (filter pred)
+                                            (into ls)))
+                                     (set dead-links)))
+        add-links       (->> results (mapcat :add) set)
+        new-network     (->> n :links
+                             (remove remove-links)
+                             (concat add-links)
+                             (rebuild n))]
+    new-network))
 
 
 (defn add-link!
@@ -379,18 +399,20 @@
                                 (sort-by :level (comparator <))
                                 distinct)
            _               (dump-links links)
-           available-links (->> links (filter ready?))
+           available-links (->> links
+                                (filter ready?))
            level           (-> available-links first :level)
            same-level?     (fn [l] (= (:level l) level))
+           pending-links   (->> available-links
+                                (remove same-level?))
            results         (->> available-links
                                 (filter same-level?)
                                 (map eval-link!)
                                 (remove nil?))
-           dead-links      (->> links (filter dead?))
+           no-consume?     (empty? results)
            upstream?       (fn [[r _]]
                              (let [r-level (level-map r)]
                                (or (nil? r-level) (< r-level level))))
-           no-consume?     (empty? results)
            timestamp       (now)
            ;; *-rvs is a sequence of reactive value pairs [r [v t]]
            all-rvs         (->> results
@@ -405,20 +427,11 @@
            downstream-rvs  (->> all-rvs
                                 (remove upstream?)
                                 (sort-by (comp level-map first) (comparator <)))
-           upstream-rvs    (->> all-rvs (filter upstream?))   
-           remove-links    (->> results
-                                (map :remove-by)
-                                (remove nil?)
-                                (reduce (fn [ls pred]
-                                          (->> network :links (filter pred) (concat ls)))
-                                        dead-links)
-                                set)
-           add-links       (->> results (mapcat :add) set)
-           pending-links   (->> available-links (remove same-level?))
-           new-network     (->> network :links
-                                (remove remove-links)
-                                (concat add-links)
-                                (make-network (:id network)))]
+           upstream-rvs    (->> all-rvs (filter upstream?))
+           new-network     (update-from-results network results)]
+       
+       ;; TODO figure out reactives that are not used any more and
+       ;; complete them, if they were derived by the network itself
        
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
@@ -426,7 +439,7 @@
          (push! r v t))
     
        (if no-consume?
-         (assoc network :no-consume? true)
+         (assoc new-network :no-consume? true)
          (loop [n new-network
                 rvs downstream-rvs] 
            (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
@@ -457,9 +470,8 @@
 
 
 (defn push!
-  "Starts an update of a reactive and a propagation cycle in a
-  different thread using network agent's send-off. 
-  Returns the value."
+  "Asynchronously starts an update of a reactive and a propagation
+  cycle using network agent's send-off.  Returns the value."
   ([reactive value]
      (push! reactive value (now)))
   ([reactive value timestamp]
@@ -469,14 +481,30 @@
      value))
 
 
-(defn complete!
-  "Delivers the ::completed value into a reactive and notifies the complete-fn
-  handler of links that the reactive is an input of."
-  [reactive]
+(defn complete-and-update!
+  "Takes a network and a reactive, delivers the ::completed value into
+  the reactive and returns an updated network."
+  [{:keys [links-map] :as n} reactive]
   (deliver! reactive [::completed (now)])
-  (doseq [l (-> reactive network-id network-by-id :links-map (get reactive))]
-    (if-let [f (:complete-fn l)]
-      (f reactive))))
+  (let [links (links-map reactive)
+        results (->> links 
+                     (map :complete-fn)
+                     (remove nil?)
+                     (reduce (fn [rs f]
+                               (conj rs (f reactive)))
+                             []))]
+    (update-from-results n results)))
+
+
+(defn complete!
+  "Asynchronously delivers the ::completed value into a reactive and
+  notifies the complete-fn handler of all links that the reactive is an
+  input of. Updates the network according to results of handlers."
+  [reactive]
+  (send-off (-> reactive network-id network-by-id)
+            complete-and-update!
+            reactive)
+  ::completed)
 
 
 ;; ===========================================================================

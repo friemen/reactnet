@@ -153,7 +153,7 @@
 (deftest add-remove-links-test
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
-        e3 (eventstream "e2")
+        e3 (eventstream "e3")
         l2 (link identity [e2] [e3])
         l1 (r/make-link "add-remove" (fn [inputs outputs]
                                        {:add [l2]
@@ -163,3 +163,21 @@
         n-after (r/update-and-propagate! n (rv e1 :foo))]
     (is (= 1 (-> n-after :links count)))
     (is (= (:label l2) (-> n-after :links first :label)))))
+
+
+(deftest dead-link-remove-test
+  (let [e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        n (network (link identity [e1] [e2]))
+        n-after (r/complete-and-update! n e1)]
+    (is (= 0 (-> n-after :links count)))))
+
+
+(deftest complete-fn-test
+  (let [e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        n (network (assoc (link identity [e1] [e2])
+                     :complete-fn (fn [r] {:add [(link identity [e2] [e1])]})))
+        n-after (r/complete-and-update! n e1)]
+    (is (= 0 (->> n-after :links (filter #(= (:outputs %) [e2])) count)))
+    (is (= 1 (->> n-after :links (filter #(= (:outputs %) [e1])) count)))))
