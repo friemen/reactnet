@@ -4,17 +4,14 @@
   (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
-;; - How to detect a reactive that becomes silently completed?
-;;   It is important to call the complete-fn once and only once!
-;; - Automatically complete derived reactives where no link outputs points to
+;; - Combinators can complete the new-r whenever the source reactives complete
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
 ;; - Add pause! and resume! for the network
-;; - Graphviz visualization of the graph
+;; - Graphviz visualization of the network
 ;; - Support core.async
 ;; - Support interceptor?
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
-;; - Back pressure: limit max number of items in agents pending queue
 
 
 ;; Ideas about completed state
@@ -136,11 +133,12 @@
   `(def ~symbol (agent (make-network ~(str *ns* "/" symbol) [])
                        :error-handler ~(fn [_ ex] (.printStackTrace ex)))))
 
-(defn network-by-id
+(defn network-by-id'
   [id]
   (let [[ns-name sym-name] (s/split id #"/")]
     (some-> ns-name symbol the-ns ns-publics (get (symbol sym-name)) var-get)))
 
+(def network-by-id (memoize network-by-id'))
 
 ;; ---------------------------------------------------------------------------
 ;; Pretty printing
@@ -510,15 +508,23 @@
         n))))
 
 
+(defn- sleep-if-necessary
+  [n-agent max-items millis]
+  (when (< max-items (.getQueueCount n-agent))
+    (Thread/sleep millis)))
+
+
 (defn push!
   "Asynchronously starts an update of a reactive and a propagation
   cycle using network agent's send-off.  Returns the value."
   ([reactive value]
      (push! reactive value (now)))
   ([reactive value timestamp]
-     (send-off (-> reactive network-id network-by-id)
-               update-and-propagate!
-               {reactive [value timestamp]})
+     (let [n-agent (-> reactive network-id network-by-id)]
+       (sleep-if-necessary n-agent 1000 100)
+       (send-off n-agent
+                 update-and-propagate!
+                 {reactive [value timestamp]}))
      value))
 
 
@@ -535,9 +541,11 @@
   notifies the complete-fn handler of all links that the reactive is an
   input of. Updates the network according to results of handlers."
   [reactive]
-  (send-off (-> reactive network-id network-by-id)
-            complete-and-update!
-            reactive)
+  (let [n-agent (-> reactive network-id network-by-id)]
+    (sleep-if-necessary 1000 100)
+    (send-off n-agent
+              complete-and-update!
+              reactive))
   ::completed)
 
 
@@ -832,28 +840,35 @@
                 (make-link-fn f make-result-map)
                 reactives)))
 
-;; TODO
+;; TODO test this
 (defn rmapcat'
   [f reactive]
   (let [[make-link-fn f] (unpack-fn f)
         n-agent          (-> reactive network-id network-by-id)
         new-r            (eventstream n-agent "mapcat'")
         queue-atom       (atom [])
-        complete-fn      (fn [r]
-                           (let [current (first @queue-atom)
-                                 new-current (first (swap! queue-atom #(->> % (remove completed?) vec)))]
-                             (if (not= current new-current)
-                               nil ;; NOW CHANGE THE LINKS
-                               )))]
-    (derive-new eventstream
-                "mapcat'"
-                (make-link-fn f
-                              (fn [result ex inputs outputs]
-                                (swap! queue-atom enqueue result)
-                                
-                                #_ {:add-links [(make-link "" (make-sync-link-fn identity) [result] [new-r]
-                                                           {:complete-fn complete-fn})]})
-                              [reactive] []))))
+        on-completed     (fn on-completed [r]
+                           (let [current (first @queue-atom)]
+                             (swap! queue-atom #(->> % (remove completed?) vec))
+                             (if (= r current)
+                               {:remove-by (fn [l] (= (:outputs l) [new-r]))
+                                :add (if-let [new-current (first @queue-atom)]
+                                       [(make-link ""
+                                                   (make-sync-link-fn identity)
+                                                   [new-current] [new-r]
+                                                   {:complete-fn on-completed})])})))]
+    (add-link! n-agent (make-link 
+                        "mapcat'"
+                        (make-link-fn f
+                                      (fn [result ex inputs outputs]
+                                        (let [q (swap! queue-atom conj result)]
+                                          (if (= 1 (count q))
+                                            {:add [(make-link ""
+                                                              (make-sync-link-fn identity)
+                                                              [(first q)] [new-r]
+                                                              {:complete-fn on-completed})]}
+                                            {}))))
+                        [reactive] []))))
 
 
 (defn rmapcat
@@ -940,7 +955,7 @@
                           (fn [inputs outputs]
                             (let [r (-> inputs first consume!)]
                               {:remove-links [#(= (:outputs %) [new-r])]
-                               :add-links [(make-link "switch" (make-sync-link-fn identity) [r] [new-r])]}))
+                               :add [(make-link "switch" (make-sync-link-fn identity) [r] [new-r])]}))
                           [reactive] []))
     new-r))
 
