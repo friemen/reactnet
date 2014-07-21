@@ -64,7 +64,7 @@
 ;;  :label            Label for pretty printing
 ;;  :inputs           Input reactives
 ;;  :outputs          Output reactives
-;;  :f                A link function (see below)
+;;  :eval-fn          A link function (see below) that evaluates input reactive values
 ;;  :error-fn         An error handler function [result ex -> Result]
 ;;  :complete-fn      A function [reactive -> nil] called when one of the
 ;;                    input reactives becomes completed 
@@ -84,7 +84,7 @@
 ;; A map returned by a link function with the following entries
 ;;  :input-values     A map {reactive -> value} containing the input values
 ;;  :output-values    A map {reactive -> value} containing the values for
-;;                    each output reactive, or a vector containing of such
+;;                    each output reactive, or a vector containing such
 ;;                    maps, i.e. {reactive -> [value*]}.                    
 ;;  :exception        Exception, or nil if output-values is valid
 ;;  :add              A seq of links to be added to the network
@@ -108,12 +108,20 @@
   (System/currentTimeMillis))
 
 
+(defn- default-link-fn
+  [inputs outputs]
+  (let [v (case (count inputs)
+            0 nil
+            1 (-> inputs first consume!)
+            (mapv consume! inputs))]
+    {:output-values (into {} (for [o outputs] [o v]))}))
+
 (defn make-link
   [label inputs outputs
    & {:keys [eval-fn error-fn complete-fn]
-      :or {eval-fn identity
-           error-fn nil #_(constantly nil)
-           complete-fn nil #_(constantly nil)}}]
+      :or {eval-fn default-link-fn
+           error-fn nil
+           complete-fn nil}}]
   {:label label
    :inputs inputs
    :outputs outputs
@@ -260,6 +268,7 @@
                                   root)
         level-map-incl-links (->> links
                                   (map (fn [l]
+                                         {:pre [(-> l :inputs seq)]}
                                          [l (->> (:inputs l)
                                                  (map level-map-wo-root)
                                                  (reduce max)
@@ -306,7 +315,7 @@
   new network."
   [{:keys [id] :as n} links]
   (let [level-map (reactive-level-map links)
-        leveled-links (map #(assoc % :level (level-map %)) links)]
+        leveled-links (mapv #(assoc % :level (level-map %)) links)]
     (assoc n
       :reactives (reactives-from-links leveled-links)
       :links leveled-links
@@ -647,7 +656,7 @@
                 (atom {:queue (PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
-                10))
+                1000))
 
 
 ;; ---------------------------------------------------------------------------
@@ -1024,6 +1033,8 @@
 
 (defnetwork n)
 
+
+
 (comment
   (def e1 (eventstream n "e1"))
   (def e2 (eventstream n "e2"))
@@ -1040,12 +1051,12 @@
        (push! e1 :foo)
        (push! e1 ::completed)))
 
-
-(def e1 (eventstream n "e1"))
-(def e2 (eventstream n "e2"))
-(def s (eventstream n "s"))
-(def switched (rswitch s))
-(subscribe println switched)
+(comment
+  (def e1 (eventstream n "e1"))
+  (def e2 (eventstream n "e2"))
+  (def s (eventstream n "s"))
+  (def switched (rswitch s))
+  (subscribe println switched))
 
 
 

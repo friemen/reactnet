@@ -184,3 +184,35 @@
         n-after (r/complete-and-update! n e1)]
     (is (= 0 (->> n-after :links (filter #(= (:outputs %) [e2])) count)))
     (is (= 1 (->> n-after :links (filter #(= (:outputs %) [e3])) count)))))
+
+
+(deftest large-mult-filter-merge-test
+  (let [c        25
+        distance 4
+        results  (atom [])
+        i        (eventstream "i")
+        o        (eventstream "o")
+        inputs   (repeatedly c #(eventstream "input"))
+        links    (->> (map vector (range c) inputs)
+                      (mapcat (fn [[x input-r]]
+                                (let [from (* x distance)
+                                      to (+ from distance)
+                                      id (str "[" from " <= x < " to "]")
+                                      filtered-r (eventstream "filtered")]
+                                  [(r/make-link id [input-r] [filtered-r]
+                                                :eval-fn (fn [inputs outputs]
+                                                           (let [x (-> inputs first r/consume!)]
+                                                             (if (and (<= from x) (< x to))
+                                                               {:output-values {(first outputs) x}}
+                                                               {}))))
+                                   (r/make-link "merge" [filtered-r] [o])])))
+                      (cons (r/make-link "mult" [i] inputs))
+                      (cons (r/make-link "subscriber" [o] []
+                                         :eval-fn (fn [inputs outputs]
+                                                    (swap! results conj (-> inputs first r/consume!))
+                                                    {}))))
+        n        (apply network links)
+        values   (repeatedly 1000 #(rand-int (* distance c)))]
+    (reduce r/update-and-propagate! n (map #(hash-map i [% (r/now)]) values))
+    (is (= values @results))))
+
