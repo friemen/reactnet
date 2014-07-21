@@ -545,7 +545,7 @@
   input of. Updates the network according to results of handlers."
   [reactive]
   (let [n-agent (-> reactive network-id network-by-id)]
-    (sleep-if-necessary 1000 100)
+    (sleep-if-necessary n-agent 1000 100)
     (send-off n-agent
               complete-and-update!
               reactive))
@@ -675,10 +675,11 @@
 
 (defn seqstream
   [n-agent xs]
-  (SeqStream. (-> n-agent deref :id)
-              (atom {:seq (seq xs)
-                     :last-value nil})
-              true))
+  (assoc (SeqStream. (-> n-agent deref :id)
+                     (atom {:seq (seq xs)
+                            :last-value nil})
+                     true)
+    :label "seq"))
 
 
 ;; ---------------------------------------------------------------------------
@@ -858,7 +859,7 @@
                      (if (or (nil? active) (completed? active))
                        {:queue (vec (rest queue))
                         :active r
-                        :add [(make-link "" [r] [new-r]
+                        :add [(make-link "mapcat'-temp" [r] [new-r]
                                          :completed-fn
                                          (fn [r]
                                            (merge (swap! state switch)
@@ -869,7 +870,8 @@
                    (switch (update-in state [:queue] conj r)))]
     (add-link! n-agent (make-link "mapcat'" [reactive] [new-r]
                                   :eval-fn (fn [inputs outputs]
-                                             (swap! state enqueue (-> inputs first consume! f)))))
+                                             (swap! state enqueue (-> inputs first consume! f)))
+                                  :complete-on-remove [new-r]))
     new-r))
 
 
