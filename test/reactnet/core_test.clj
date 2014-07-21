@@ -216,3 +216,25 @@
     (reduce r/update-and-propagate! n (map #(hash-map i [% (r/now)]) values))
     (is (= values @results))))
 
+
+(deftest complete-on-remove-test
+  (let [e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        e3 (eventstream "e3")
+        e4 (eventstream "e4")
+        results (atom [])
+        n (network (r/make-link "e1,e2->e3" [e1 e2] [e3]
+                                :eval-fn (fn [inputs outputs]
+                                           (let [v (->> inputs (map r/consume!) (reduce +))]
+                                             {:output-values {(first outputs) v}}) )
+                                :complete-on-remove [e3])
+                   (r/make-link "e3->e4" [e3] [e4]
+                                :complete-on-remove [e4])
+                   (link (partial swap! results conj) [e4] []))]
+    (r/update-and-propagate! n {e1 [1 (r/now)] e2 [2 (r/now)]})
+    (is (= [3] @results))
+    (r/complete-and-update! n e1)
+    (is (r/completed? e1))
+    (is (not (r/completed? e2)))
+    (is (r/completed? e3))
+    (is (r/completed? e4))))

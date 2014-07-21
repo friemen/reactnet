@@ -4,7 +4,6 @@
   (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
-;; - Support automatic completion of derived reactives
 ;; - Think about preserving somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Create unit test for cyclic deps
@@ -14,13 +13,6 @@
 ;; - Support core.async
 ;; - Support interceptor?
 ;; - Make scheduler available in different ns, support at and at-fixed-rate 
-
-
-;; Ideas about completed state
-;; - A reactive becomes obsolete if it was created by the network but is no
-;;   longer referenced by a link of that network.
-;; - A completed reactive must not receive any outputs -> remove it from links :outputs.
-;; - Derived reactives become completed when all links delivering to them are dead.
 
 
 ;; Ideas about error handling
@@ -67,7 +59,8 @@
 ;;  :eval-fn          A link function (see below) that evaluates input reactive values
 ;;  :error-fn         An error handler function [result ex -> Result]
 ;;  :complete-fn      A function [reactive -> nil] called when one of the
-;;                    input reactives becomes completed 
+;;                    input reactives becomes completed
+;;  :complete-on-remove  A seq of reactives to be completed when this link is removed
 ;;  :level            The level within the reactive network
 ;;                    (max level of all input reactives + 1)
 
@@ -118,16 +111,15 @@
 
 (defn make-link
   [label inputs outputs
-   & {:keys [eval-fn error-fn complete-fn]
-      :or {eval-fn default-link-fn
-           error-fn nil
-           complete-fn nil}}]
+   & {:keys [eval-fn error-fn complete-fn complete-on-remove]
+      :or {eval-fn default-link-fn}}]
   {:label label
    :inputs inputs
    :outputs outputs
    :eval-fn eval-fn
    :error-fn error-fn
    :complete-fn complete-fn
+   :complete-on-remove complete-on-remove
    :level 0})
 
 
@@ -344,7 +336,11 @@
                                             (filter pred)
                                             (into ls)))
                                      (set dead-links)))
+        to-complete     (->> remove-links
+                             (mapcat :complete-on-remove))
         add-links       (->> results (mapcat :add) set)]
+    (doseq [r to-complete]
+      (deliver! r [::completed (now)]))
     (if (or (seq add-links) (seq remove-links))
       (->> n :links
            (remove remove-links)
@@ -460,7 +456,6 @@
                                 (map eval-link!)
                                 (remove nil?))
            no-consume?     (empty? results)
-           
            ;; process Result maps 
            ;; *-rvs is a sequence of reactive value pairs [r [v t]]
            all-rvs         (extract-values results)
@@ -474,10 +469,6 @@
            upstream-rvs    (->> all-rvs (filter upstream?))
            ;; apply network changes returned by link function invocations
            network         (update-from-results network results)]
-       
-       ;; TODO figure out reactives that are not used any more and
-       ;; complete them, if they were derived by the network itself
-       
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvs]
@@ -833,7 +824,8 @@
         n-agent (network-by-id n-id)
         new-r (factory-fn n-agent label)]
     (add-link! n-agent (make-link label inputs [new-r]
-                                  :eval-fn link-fn))
+                                  :eval-fn link-fn
+                                  :complete-on-remove [new-r]))
     new-r))
 
 
