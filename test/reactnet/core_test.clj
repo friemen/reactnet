@@ -25,7 +25,7 @@
                 (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
-                10))
+                1000))
 
 
 (defmacro link
@@ -238,3 +238,41 @@
     (is (not (r/completed? e2)))
     (is (r/completed? e3))
     (is (r/completed? e4))))
+
+
+(deftest flatmap-test
+  (let [f (fn [c] (let [e (eventstream (str "E" c))]
+                    (dotimes [i c] (r/deliver! e [i (r/now)]))
+                    (r/deliver! e [::r/completed (r/now)])
+                    e))
+        e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        results (atom [])
+        n (network (let [state (atom {:queue []
+                                      :active nil})
+                         switch (fn switch [{:keys [queue active] :as state}]
+                                  (if-let [r (first queue)]
+                                    (if (or (nil? active) (r/completed? active))
+                                      {:queue (vec (rest queue))
+                                       :active r
+                                       :add [(r/make-link "" [r] [e2]
+                                                          :completed-fn
+                                                          (fn [r]
+                                                            (merge (swap! state switch)
+                                                                   {:remove-by #(= [r] (:inputs %))})))]}
+                                      state)
+                                    state))
+                         enqueue (fn [state r]
+                                   (switch (update-in state [:queue] conj r)))]
+                     (r/make-link "e1->e2" [e1] [e2]
+                                  :eval-fn (fn [inputs outputs]
+                                             (swap! state enqueue (-> inputs first r/consume! f))
+                                             (swap! state switch))))
+                   (link (partial swap! results conj) [e2] []))
+        ranges (range 2 100)
+        expected (mapcat #(range %) ranges)
+        n-after (->> ranges
+                     (map (partial rv e1))
+                     (reduce r/update-and-propagate! n))]
+    (is (= expected @results))
+    (is (= 3 (-> n-after :links count)))))

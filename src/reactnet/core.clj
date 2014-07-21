@@ -53,16 +53,16 @@
 
 ;; Link:
 ;; A map that combines m input reactives, n output reactives and a link function f.
-;;  :label            Label for pretty printing
-;;  :inputs           Input reactives
-;;  :outputs          Output reactives
-;;  :eval-fn          A link function (see below) that evaluates input reactive values
-;;  :error-fn         An error handler function [result ex -> Result]
-;;  :complete-fn      A function [reactive -> nil] called when one of the
-;;                    input reactives becomes completed
+;;  :label               Label for pretty printing
+;;  :inputs              Input reactives
+;;  :outputs             Output reactives
+;;  :eval-fn             A link function (see below) that evaluates input reactive values
+;;  :error-fn            An error handler function [result ex -> Result]
+;;  :complete-fn         A function [reactive -> nil] called when one of the
+;;                       input reactives becomes completed
 ;;  :complete-on-remove  A seq of reactives to be completed when this link is removed
-;;  :level            The level within the reactive network
-;;                    (max level of all input reactives + 1)
+;;  :level               The level within the reactive network
+;;                       (max level of all input reactives + 1)
 
 ;; Link function:
 ;; A function that takes two args (input and output reactives) and returns
