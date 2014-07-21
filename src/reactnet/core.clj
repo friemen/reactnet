@@ -845,33 +845,32 @@
                 (make-link-fn f make-result-map)
                 reactives)))
 
-;; TODO test this
+
 (defn rmapcat'
   [f reactive]
   (let [[make-link-fn f] (unpack-fn f)
-        n-agent          (-> reactive network-id network-by-id)
-        new-r            (eventstream n-agent "mapcat'")
-        queue-atom       (atom [])
-        on-completed     (fn on-completed [r]
-                           (let [current (first @queue-atom)]
-                             (swap! queue-atom #(->> % (remove completed?) vec))
-                             (if (= r current)
-                               {:remove-by (fn [l] (= (:outputs l) [new-r]))
-                                :add (if-let [new-current (first @queue-atom)]
-                                       [(make-link "" [new-current] [new-r]
-                                                   :eval-fn (make-sync-link-fn identity)
-                                                   :complete-fn on-completed)])})))]
-    (add-link! n-agent (make-link 
-                        "mapcat'" [reactive] []
-                        :eval-fn
-                        (make-link-fn f
-                                      (fn [result ex inputs outputs]
-                                        (let [q (swap! queue-atom conj result)]
-                                          (if (= 1 (count q))
-                                            {:add [(make-link "" [(first q)] [new-r]
-                                                              :eval-fn (make-sync-link-fn identity)
-                                                              :complete-fn on-completed)]}
-                                            {}))))))))
+        n-agent  (-> reactive network-id network-by-id)
+        new-r    (eventstream n-agent "mapcat'")
+        state    (atom {:queue []
+                        :active nil})
+        switch   (fn switch [{:keys [queue active] :as state}]
+                   (if-let [r (first queue)]
+                     (if (or (nil? active) (completed? active))
+                       {:queue (vec (rest queue))
+                        :active r
+                        :add [(make-link "" [r] [new-r]
+                                         :completed-fn
+                                         (fn [r]
+                                           (merge (swap! state switch)
+                                                  {:remove-by #(= [r] (:inputs %))})))]}
+                       state)
+                     state))
+        enqueue  (fn [state r]
+                   (switch (update-in state [:queue] conj r)))]
+    (add-link! n-agent (make-link "mapcat'" [reactive] [new-r]
+                                  :eval-fn (fn [inputs outputs]
+                                             (swap! state enqueue (-> inputs first consume! f)))))
+    new-r))
 
 
 (defn rmapcat
@@ -1026,11 +1025,12 @@
 (defnetwork n)
 
 
+(def e1 (eventstream n "e1"))
+(def e2 (rmapcat' #(seqstream n (range %)) e1) )
+(subscribe println e2)
+
 
 (comment
-  (def e1 (eventstream n "e1"))
-  (def e2 (eventstream n "e2"))
-
   (def c (rconcat e1 e2))
   (def results (atom []))
   (subscribe (partial swap! results conj) c)

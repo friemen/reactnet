@@ -266,8 +266,7 @@
                                    (switch (update-in state [:queue] conj r)))]
                      (r/make-link "e1->e2" [e1] [e2]
                                   :eval-fn (fn [inputs outputs]
-                                             (swap! state enqueue (-> inputs first r/consume! f))
-                                             (swap! state switch))))
+                                             (swap! state enqueue (-> inputs first r/consume! f)))))
                    (link (partial swap! results conj) [e2] []))
         ranges (range 2 100)
         expected (mapcat #(range %) ranges)
