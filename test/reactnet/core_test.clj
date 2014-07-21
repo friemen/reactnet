@@ -30,7 +30,8 @@
 
 (defmacro link
   [f inputs outputs]
-  `(r/make-link (str '~f) (r/make-sync-link-fn ~f) ~inputs ~outputs))
+  `(r/make-link (str '~f) ~inputs ~outputs
+                :eval-fn (r/make-sync-link-fn ~f)))
 
 
 (defn network
@@ -99,12 +100,12 @@
   (let [results (atom [])
         pass? (atom false)
         e1 (eventstream "e1")
-        n (network (r/make-link "collect"
+        n (network (r/make-link "collect" [e1] []
+                                :eval-fn
                                 (fn [inputs outputs]
                                   (when @pass?
                                     (swap! results conj (-> inputs first r/consume!))
-                                    {}))
-                                [e1] []))]
+                                    {}))))]
     (->> [[e1 :foo] [e1 :bar]]
          (map (partial apply rv))
          (reduce r/update-and-propagate! n))
@@ -137,12 +138,12 @@
         e3 (eventstream "e3")
         e4 (eventstream "e4")
         numbers (seqstream (range))
-        n (network (r/make-link "items"
+        n (network (r/make-link "items" [e1] [e2]
+                                :eval-fn
                                 (fn [inputs outputs]
                                   {:output-values (mapv
                                                    (partial hash-map (first outputs))
-                                                   (-> inputs first r/consume! :items))})
-                                [e1] [e2])
+                                                   (-> inputs first r/consume! :items))}))
                    (link name [e2] [e3])
                    (link vector [numbers e3] [e4])
                    (link (partial swap! results conj) [e4] []))]
@@ -155,10 +156,11 @@
         e2 (eventstream "e2")
         e3 (eventstream "e3")
         l2 (link identity [e2] [e3])
-        l1 (r/make-link "add-remove" (fn [inputs outputs]
-                                       {:add [l2]
-                                        :remove-by #(= (:outputs %) [e2])})
-                        [e1] [e2])
+        l1 (r/make-link "add-remove" [e1] [e2]
+                        :eval-fn
+                        (fn [inputs outputs]
+                          {:add [l2]
+                           :remove-by #(= (:outputs %) [e2])}))
         n (network l1)
         n-after (r/update-and-propagate! n (rv e1 :foo))]
     (is (= 1 (-> n-after :links count)))

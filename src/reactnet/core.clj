@@ -4,7 +4,9 @@
   (:import [clojure.lang PersistentQueue]))
 
 ;; TODOs
-;; - Combinators can complete the new-r whenever the source reactives complete
+;; - Support automatic completion of derived reactives
+;; - Think about preserving somehow the timestamp when applying a link function:
+;;   Use the max timestamp of all input values.
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
 ;; - Add pause! and resume! for the network
@@ -107,17 +109,18 @@
 
 
 (defn make-link
-  ([label f inputs outputs]
-     (make-link label f inputs outputs nil))
-  ([label f inputs outputs options-map]
-     (merge {:label label
-             :f f
-             :inputs inputs
-             :outputs outputs
-             :error-fn nil
-             :complete-fn nil
-             :level 0}
-            options-map)))
+  [label inputs outputs
+   & {:keys [eval-fn error-fn complete-fn]
+      :or {eval-fn identity
+           error-fn nil #_(constantly nil)
+           complete-fn nil #_(constantly nil)}}]
+  {:label label
+   :inputs inputs
+   :outputs outputs
+   :eval-fn eval-fn
+   :error-fn error-fn
+   :complete-fn complete-fn
+   :level 0})
 
 
 (declare rebuild)
@@ -285,8 +288,8 @@
 
 
 (defn dead?
-  "Returns true for a link if at least of it's inputs is completed or
-  all outputs are completed."
+  "Returns true for a link if at least one of it's inputs is completed
+  or all outputs are completed."
   [{:keys [inputs outputs]}]
   (or (empty? inputs)
       (some completed? inputs)
@@ -389,8 +392,8 @@
 (defn- eval-link!
   "Evaluates one link, returning Result map, nor nil if the link function
   did not consume a value."
-  [{:keys [f inputs outputs level] :as link}]
-  (let [result        (try (f inputs outputs)
+  [{:keys [eval-fn inputs outputs level] :as link}]
+  (let [result        (try (eval-fn inputs outputs)
                            (catch Exception ex {:exception ex}))
         inputs        {:input-values (->> inputs
                                           (map #(vector % (get-value %)))
@@ -820,7 +823,8 @@
   (let [n-id (network-id (first inputs))
         n-agent (network-by-id n-id)
         new-r (factory-fn n-agent label)]
-    (add-link! n-agent (make-link label link-fn inputs [new-r]))
+    (add-link! n-agent (make-link label inputs [new-r]
+                                  :eval-fn link-fn))
     new-r))
 
 
@@ -853,22 +857,20 @@
                              (if (= r current)
                                {:remove-by (fn [l] (= (:outputs l) [new-r]))
                                 :add (if-let [new-current (first @queue-atom)]
-                                       [(make-link ""
-                                                   (make-sync-link-fn identity)
-                                                   [new-current] [new-r]
-                                                   {:complete-fn on-completed})])})))]
+                                       [(make-link "" [new-current] [new-r]
+                                                   :eval-fn (make-sync-link-fn identity)
+                                                   :complete-fn on-completed)])})))]
     (add-link! n-agent (make-link 
-                        "mapcat'"
+                        "mapcat'" [reactive] []
+                        :eval-fn
                         (make-link-fn f
                                       (fn [result ex inputs outputs]
                                         (let [q (swap! queue-atom conj result)]
                                           (if (= 1 (count q))
-                                            {:add [(make-link ""
-                                                              (make-sync-link-fn identity)
-                                                              [(first q)] [new-r]
-                                                              {:complete-fn on-completed})]}
-                                            {}))))
-                        [reactive] []))))
+                                            {:add [(make-link "" [(first q)] [new-r]
+                                                              :eval-fn (make-sync-link-fn identity)
+                                                              :complete-fn on-completed)]}
+                                            {}))))))))
 
 
 (defn rmapcat
@@ -899,9 +901,8 @@
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r (eventstream n-agent "merge")]
     (doseq [r reactives]
-      (add-link! n-agent (make-link "merge"
-                                    (make-sync-link-fn identity make-result-map)
-                                    [r] [new-r])))
+      (add-link! n-agent (make-link "merge" [r] [new-r]
+                                    :eval-fn (make-sync-link-fn identity make-result-map))))
     new-r))
 
 
@@ -942,7 +943,7 @@
                     (if (available? r)
                       (make-result-map (consume! r) nil inputs outputs))))]
     (doseq [r reactives]
-      (add-link! n-agent (make-link "concat" f [r] [new-r])))
+      (add-link! n-agent (make-link "concat" [r] [new-r] :eval-fn f)))
     new-r))
 
 
@@ -951,12 +952,13 @@
   (let [n-agent (-> reactive network-id network-by-id)
         new-r   (eventstream n-agent "switch")]
     (add-link! n-agent
-               (make-link "switcher"
+               (make-link "switcher" [reactive] []
+                          :eval-fn
                           (fn [inputs outputs]
                             (let [r (-> inputs first consume!)]
                               {:remove-links [#(= (:outputs %) [new-r])]
-                               :add [(make-link "switch" (make-sync-link-fn identity) [r] [new-r])]}))
-                          [reactive] []))
+                               :add [(make-link "switch" [r] [new-r]
+                                                :eval-fn (make-sync-link-fn identity))]}))))
     new-r))
 
 
@@ -979,7 +981,8 @@
   (let [[make-link-fn f] (unpack-fn f)
         n-id (network-id reactive)
         n-agent (network-by-id n-id)]
-    (add-link! n-agent (make-link "subscriber" (make-link-fn f (constantly {})) [reactive] []))
+    (add-link! n-agent (make-link "subscriber" [reactive] []
+                                  :eval-fn (make-link-fn f (constantly {}))))
     reactive))
 
 
