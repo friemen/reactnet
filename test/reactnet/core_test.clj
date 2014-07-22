@@ -1,7 +1,8 @@
 (ns reactnet.core-test
   (:require [clojure.test :refer :all]
-            [reactnet.core :as r])
-  (:import [reactnet.core SeqStream Behavior Eventstream]))
+            [reactnet.core :as r]
+            [reactnet.reactor :as ru])
+  (:import [reactnet.reactor SeqStream Behavior Eventstream]))
 
 
 
@@ -31,7 +32,7 @@
 (defmacro link
   [f inputs outputs]
   `(r/make-link (str '~f) ~inputs ~outputs
-                :eval-fn (r/make-sync-link-fn ~f)))
+                :eval-fn (ru/make-sync-link-fn ~f)))
 
 
 (defn network
@@ -171,7 +172,7 @@
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
         n (network (link identity [e1] [e2]))
-        n-after (r/complete-and-update! n e1)]
+        n-after (r/complete-and-propagate! n e1)]
     (is (= 0 (-> n-after :links count)))))
 
 
@@ -181,7 +182,7 @@
         e3 (eventstream "e3")
         n (network (assoc (link identity [e1] [e2])
                      :complete-fn (fn [r] {:add [(link identity [e2] [e3])]})))
-        n-after (r/complete-and-update! n e1)]
+        n-after (r/complete-and-propagate! n e1)]
     (is (= 0 (->> n-after :links (filter #(= (:outputs %) [e2])) count)))
     (is (= 1 (->> n-after :links (filter #(= (:outputs %) [e3])) count)))))
 
@@ -233,7 +234,7 @@
                    (link (partial swap! results conj) [e4] []))]
     (r/update-and-propagate! n {e1 [1 (r/now)] e2 [2 (r/now)]})
     (is (= [3] @results))
-    (r/complete-and-update! n e1)
+    (r/complete-and-propagate! n e1)
     (is (r/completed? e1))
     (is (not (r/completed? e2)))
     (is (r/completed? e3))
