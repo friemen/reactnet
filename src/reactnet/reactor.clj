@@ -1,8 +1,12 @@
 (ns reactnet.reactor
   (:require [clojure.string :as s]
+            [reactnet.scheduler :as sched]
             [reactnet.core :refer :all])
   (:import [clojure.lang PersistentQueue]))
 
+
+;; TODOS
+;; - How to prevent scheduled tasks from accumulating?
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL
@@ -135,30 +139,6 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Simplistic scheduler support
-
-(import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit])
-
-
-(defonce ^:private scheduler (ScheduledThreadPoolExecutor. 5))
-
-(defonce tasks (atom {}))
-
-(defn clean-tasks!
-  []
-  (swap! tasks (fn [task-map]
-                 (->> task-map
-                      (remove #(let [t (second %)]
-                                 (or (.isCancelled t) (.isDone t))))
-                      (into {})))))
-
-(defn cancel-tasks!
-  []
-  (doseq [[r f] @tasks]
-    (.cancel f true)))
-
-
-;; ---------------------------------------------------------------------------
 ;; Link function factories and execution
 
 (defn safely-apply
@@ -242,7 +222,13 @@
       :dequeued [])))
 
 
+;; ---------------------------------------------------------------------------
+(defonce scheduler (sched/scheduler 5))
 
+
+(defn halt!
+  []
+  (sched/cancel-all scheduler))
 
 ;; ---------------------------------------------------------------------------
 ;; More constructors of reactives
@@ -250,15 +236,13 @@
 (defn rsample
   [n-agent millis f]
   (let [new-r (eventstream n-agent "sample")
-        task  (.scheduleAtFixedRate scheduler
-                                    #(push! new-r
-                                            (try (f)
-                                                 (catch Exception ex
-                                                   (do (.printStackTrace ex)
-                                                       ;; TODO what to push in case f fails?
-                                                       ex))))
-                                    0 millis TimeUnit/MILLISECONDS)]
-    (swap! tasks assoc new-r task)
+        task  (sched/interval scheduler millis
+                              #(push! new-r
+                                      (try (f)
+                                           (catch Exception ex
+                                             (do (.printStackTrace ex)
+                                                 ;; TODO what to push in case f fails?
+                                                 ex)))))]
     new-r))
 
 
@@ -444,8 +428,8 @@
                 (fn [inputs outputs]
                   (let [output (first outputs)
                         v (-> inputs first consume!)]
-                    (swap! tasks assoc output
-                           (.schedule scheduler #(push! output v) millis TimeUnit/MILLISECONDS))))
+                    (sched/once scheduler millis #(push! output v))
+                    {}))
                 [reactive])))
 
 
@@ -459,11 +443,9 @@
                             (let [v (-> inputs first consume!)]
                               (swap! queue-atom enqueue v)))
                           [reactive])]
-    (swap! tasks assoc new-r
-           (.scheduleAtFixedRate scheduler
-                                 #(let [vs (:dequeued (swap! queue-atom dequeue))]
-                                    (when-not (empty? vs) (push! new-r (first vs))))
-                                 millis millis TimeUnit/MILLISECONDS))
+    (sched/interval scheduler millis
+                    #(let [vs (:dequeued (swap! queue-atom dequeue))]
+                       (when-not (empty? vs) (push! new-r (first vs)))))
     new-r))
 
 
