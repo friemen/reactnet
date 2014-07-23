@@ -147,27 +147,9 @@
     (for [v vs] [r [v t]])))
 
 
+
 ;; ---------------------------------------------------------------------------
-;; Tools for implementing Link functions
-
-(defn safely-apply
-  "Applies f to xs, and catches exceptions.
-  Returns a pair of [result exception], at least one of them being nil."
-  [f xs]
-  (try [(apply f xs) nil]
-       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
-
-
-(defn make-result-map
-  "Input is a Result map as it was passed into a Link function. If
-  the exception ex is nil produces broadcasting output-rvts, otherwise
-  adds the exception. Returns an updated Result map."
-  ([input value]
-     (make-result-map input value nil))
-  ([{:keys [output-reactives] :as input} value ex]
-     (assoc input 
-       :output-rvts (if-not ex (broadcast-value value output-reactives))
-       :exception ex)))
+;; Factories
 
 
 (defn- default-link-fn
@@ -181,10 +163,6 @@
             1 (fvalue input-rvts)
             (values input-rvts))]
     (assoc input :output-rvts (broadcast-value v output-reactives))))
-
-
-;; ---------------------------------------------------------------------------
-;; Factories
 
 
 (defn make-link
@@ -676,8 +654,30 @@
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
 
 
+
 ;; ---------------------------------------------------------------------------
-;; Link function factories and execution
+;; Tools for implementing Link functions
+
+
+(defn safely-apply
+  "Applies f to xs, and catches exceptions.
+  Returns a pair of [result exception], at least one of them being nil."
+  [f xs]
+  (try [(apply f xs) nil]
+       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
+
+
+(defn make-result-map
+  "Input is a Result map as passed into a Link function. If the
+  exception ex is nil produces a broadcasting output-rvts, otherwise
+  adds the exception. Returns an updated Result map."
+  ([input value]
+     (make-result-map input value nil))
+  ([{:keys [output-reactives] :as input} value ex]
+     (assoc input 
+       :output-rvts (if-not ex (broadcast-value value output-reactives))
+       :exception ex)))
+
 
 (defn make-async-link-fn
   [f result-fn]

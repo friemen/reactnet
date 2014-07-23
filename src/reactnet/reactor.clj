@@ -242,10 +242,9 @@
 (defn rmerge
   [& reactives]
   (let [n-agent (-> reactives first network-id network-by-id)
-        new-r   (eventstream n-agent "merge")]
-    (doseq [r reactives]
-      (add-links! n-agent (make-link "merge" [r] [new-r]
-                                     :eval-fn (make-sync-link-fn identity make-result-map))))
+        new-r   (eventstream n-agent "merge")
+        links   (->> reactives (map #(make-link "merge" [%] [new-r])))]
+    (apply (partial add-links! n-agent) links)
     new-r))
 
 
