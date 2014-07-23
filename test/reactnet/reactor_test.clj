@@ -5,6 +5,9 @@
 
 (defnetwork n)
 
+;; ---------------------------------------------------------------------------
+;; Support functions
+
 (defn with-clean-network
   [f]
   (send-off n (fn [n] (rn/make-network (:id n) [])))
@@ -24,6 +27,55 @@
   (doseq [[r v] (partition 2 rvs)]
     (push! r v))
   (wait))
+
+
+;; ---------------------------------------------------------------------------
+;; Tests
+
+
+(deftest sample-test
+  (testing "Sample constant value"
+    (let [r   (atom [])
+          s   (->> :foo (r/rsample n 100) (r/swap-conj! r))]
+      (wait 500)
+      (is (<= 4 (count @r)))
+      (is (= [:foo :foo :foo :foo] (take 4 @r)))))
+  (testing "Sample by invoking a function"
+    (let [r   (atom [])
+          s   (->> #(count @r) (r/rsample n 100) (r/swap-conj! r))]
+      (wait 500)
+      (is (<= 4 (count @r)))
+      (is (= [0 1 2 3] (take 4 @r)))))
+  (testing "Sample from a ref"
+    (let [r   (atom [])
+          a   (atom 0)
+          s   (->> a (r/rsample n 100) (r/swap-conj! r))]
+      (wait 150)
+      (reset! a 1)
+      (wait 400)
+      (is (<= 4 (count @r)))
+      (is (= [0 0 1 1] (take 4 @r))))))
+
+
+(deftest reduce-test
+  (let [values (range 1 50)
+        e1     (r/eventstream n "e1")
+        b      (->> e1 (r/rreduce + 0))]
+    (is (r/behavior? b))
+    (apply push-and-wait! (interleave (repeat e1) values))
+    (is (= @b (reduce + values)))))
+
+
+(deftest merge-test
+  (let [r        (atom [])
+        streams  (for [i (range 5)]
+                   (r/eventstream n (str "e" i)))
+        expected (repeatedly 400 #(rand-int 100))
+        c        (->> streams (apply r/rmerge) (r/swap-conj! r))]
+    (doseq [x expected]
+      (push! (rand-nth streams) x))
+    (wait 1500)
+    (is (= expected @r))))
 
 
 (deftest concat-test

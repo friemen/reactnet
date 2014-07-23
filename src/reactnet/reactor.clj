@@ -42,6 +42,16 @@
     :label "seq"))
 
 
+(defn eventstream?
+  [reactive]
+  (or (instance? Eventstream reactive)
+      (instance? SeqStream reactive)))
+
+
+(defn behavior?
+  [reactive]
+  (instance? Behavior reactive))
+
 (defn async
   [f]
   {:async f})
@@ -138,15 +148,21 @@
 ;; More constructors of reactives
 
 (defn rsample
-  [n-agent millis f]
-  (let [new-r (eventstream n-agent "sample")
-        task  (sched/interval scheduler millis
-                              #(push! new-r
-                                      (try (f)
-                                           (catch Exception ex
-                                             (do (.printStackTrace ex)
-                                                 ;; TODO what to push in case f fails?
-                                                 ex)))))]
+  [n-agent millis f-or-ref-or-value]
+  (let [sample-fn (cond
+                   (fn? f-or-ref-or-value)
+                   #(try (f-or-ref-or-value)
+                         (catch Exception ex
+                           (do (.printStackTrace ex)
+                               ;; TODO what to push in case f fails?
+                               ex)))
+                   (instance? clojure.lang.IRef f-or-ref-or-value)
+                   #(deref f-or-ref-or-value)
+                   :else
+                   (constantly f-or-ref-or-value))
+        new-r      (eventstream n-agent "sample")
+        task       (sched/interval scheduler millis
+                                   #(push! new-r (sample-fn)))]
     new-r))
 
 
@@ -154,7 +170,7 @@
 ;; Some combinators
 
 
-(defn derive-new
+(defn- derive-new
   [factory-fn label link-fn inputs]
   {:pre [(seq inputs)]}
   (let [n-id    (network-id (first inputs))
