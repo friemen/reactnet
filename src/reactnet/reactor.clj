@@ -141,44 +141,16 @@
 ;; ---------------------------------------------------------------------------
 ;; Link function factories and execution
 
-(defn safely-apply
-  "Applies f to xs, but catches Exception instances.
-  Returns a pair of [result exception]."
-  [f xs]
-  (try [(apply f xs) nil]
-       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
-
-
-(defn values
-  [rvt-map inputs]
-  (->> inputs (map rvt-map) (map first)))
-
-
-(defn first-value
-  [rvt-map inputs]
-  (-> inputs first rvt-map first))
-
-
-(defn make-output-value-map
-  [value outputs]
-  (reduce (fn [m r] (assoc m r value)) {} outputs))
-
-
-(defn make-result-map
-  [rvt-map value ex inputs outputs]
-  {:output-values (if-not ex (make-output-value-map value outputs))
-   :exception ex})
-
-
 (defn make-async-link-fn
   [f result-fn]
-  (fn [rvt-map inputs outputs]
-    (future (let [n-agent     (-> inputs first network-id network-by-id)
-                  [result ex] (safely-apply f (values rvt-map inputs))
-                  result-map  (result-fn rvt-map result ex inputs outputs)]
+  (fn [{:keys [input-reactives input-rvts] :as input}]
+    (future (let [n-agent     (-> input-reactives first network-id network-by-id)
+                  [v ex]      (safely-apply f (values input-rvts))
+                  result-map  (result-fn input v ex)]
+              ;; send changes / values to network agent
               (when (or (seq (:add result-map)) (:remove-by result-map))
                 (send-off n-agent update-from-results! [result-map]))
-              (doseq [[r v] (:output-values result-map)]
+              (doseq [[r [v t]] (:output-rvts result-map)]
                 (push! r v))))
     nil))
 
@@ -187,9 +159,9 @@
   ([f]
      (make-sync-link-fn f make-result-map))
   ([f result-fn]
-     (fn [rvt-map inputs outputs]
-       (let [[result ex] (safely-apply f (values rvt-map inputs))]
-         (result-fn rvt-map result ex inputs outputs)))))
+     (fn [{:keys [input-rvts] :as input}]
+       (let [[v ex] (safely-apply f (values input-rvts))]
+         (result-fn input v ex)))))
 
 
 (defn async
@@ -311,8 +283,8 @@
         enqueue  (fn [state r]
                    (switch (update-in state [:queue] conj r)))]
     (add-links! n-agent (make-link "mapcat'" [reactive] [new-r]
-                                   :eval-fn (fn [rvt-map inputs _]
-                                              (swap! state enqueue (first-value rvt-map inputs)))
+                                   :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                              (swap! state enqueue (fvalue input-rvts)))
                                    :complete-on-remove [new-r]))
     new-r))
 
@@ -322,9 +294,11 @@
   (let [[make-link-fn f] (unpack-fn f)]
     (derive-new eventstream
                 "mapcat"
-                (make-link-fn f (fn [rvt-map result ex inputs outputs]
-                                  {:output-values (if-not ex (mapv #(make-output-value-map % outputs) result))
-                                   :exception ex}))
+                (make-link-fn f (fn [input vs ex]
+                                  (assoc input
+                                    :output-rvts (if-not ex
+                                                   (enqueue-values vs (-> input :output-reactives first)))
+                                    :exception ex)))
                 reactives)))
 
 
@@ -355,13 +329,11 @@
   (let [[make-link-fn f] (unpack-fn pred)]
     (derive-new eventstream
                 "filter"
-                (make-link-fn f (fn [rvt-map result ex inputs outputs]
-                                  (if result
-                                    (make-result-map rvt-map
-                                                     (first-value rvt-map inputs)
-                                                     ex
-                                                     inputs
-                                                     outputs))))
+                (make-link-fn f (fn [{:keys [input-rvts] :as input} v ex]
+                                  (if v
+                                    (make-result-map input
+                                                     (fvalue input-rvts)
+                                                     ex))))
                 [reactive])))
 
 
@@ -370,11 +342,11 @@
   (let [c (atom no)]
     (derive-new eventstream
               "take"
-              (fn [rvt-map inputs outputs]
-                (let [v (first-value rvt-map inputs)]
+              (fn [{:keys [input-rvts] :as input}]
+                (let [v (fvalue input-rvts)]
                   (if (> @c 0)
                     (do (swap! c dec)
-                        (make-result-map rvt-map v nil inputs outputs))
+                        (make-result-map input v))
                     {})))
               [reactive])))
 
@@ -383,10 +355,10 @@
   [& reactives]
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r   (eventstream n-agent "concat")
-        f       (fn [rvt-map inputs outputs]
+        f       (fn [{:keys [input-rvts] :as input}]
                   (let [rs (remove completed? reactives)]
                     (if (seq rs)
-                      (make-result-map rvt-map (first-value rvt-map rs) nil inputs outputs))))]
+                      (make-result-map input (fvalue input-rvts)))))]
     (doseq [r reactives]
       (add-links! n-agent (make-link "concat" [r] [new-r] :eval-fn f)))
     new-r))
@@ -399,8 +371,8 @@
     (add-links! n-agent
                 (make-link "switcher" [reactive] []
                            :eval-fn
-                           (fn [rvt-map inputs outputs]
-                             (let [r (first-value rvt-map inputs)]
+                           (fn [{:keys [input-rvts] :as input}]
+                             (let [r (fvalue input-rvts)]
                                {:remove-by [#(= (:outputs %) [new-r])]
                                 :add [(make-link "switch" [r] [new-r]
                                                  :eval-fn (make-sync-link-fn identity))]}))))
@@ -412,12 +384,12 @@
   (let [l (java.util.LinkedList.)]
     (derive-new eventstream
                 "buffer"
-                (fn [rvt-map inputs outputs]
-                  (let [v (first-value rvt-map inputs)]
+                (fn [{:keys [input-rvts] :as input}]
+                  (let [v (fvalue input-rvts)]
                     (when (>= (.size l) no)
                       (.removeLast l))
                     (.addFirst l v)
-                    (make-result-map rvt-map (vec l) nil inputs outputs)))
+                    (make-result-map input (vec l))))
                 [reactive])))
 
 
@@ -437,11 +409,11 @@
   (let [n-agent (-> reactive network-id network-by-id)]
     (derive-new eventstream
                 "delay"
-                (fn [rvt-map inputs outputs]
-                  (let [output (first outputs)
-                        v (first-value rvt-map)]
+                (fn [{:keys [input-rvts output-reactives] :as input}]
+                  (let [output (first output-reactives)
+                        v      (fvalue input-rvts)]
                     (sched/once scheduler millis #(push! output v))
-                    {}))
+                    nil))
                 [reactive])))
 
 
@@ -451,9 +423,10 @@
         queue-atom (atom (make-queue max-queue-size))
         new-r (derive-new eventstream
                           "throttle"
-                          (fn [rvt-map inputs _]
-                            (let [v (first-value rvt-map inputs)]
-                              (swap! queue-atom enqueue v)))
+                          (fn [{:keys [input-rvts] :as input}]
+                            (let [v (fvalue input-rvts)]
+                              (swap! queue-atom enqueue v)
+                              nil))
                           [reactive])]
     (sched/interval scheduler millis
                     #(let [vs (:dequeued (swap! queue-atom dequeue))]

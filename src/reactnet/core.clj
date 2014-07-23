@@ -51,66 +51,140 @@
 
 ;; Link:
 ;; A map connecting input and output reactives via a function.
-;;  :label               Label for pretty printing
-;;  :inputs              Input reactives
-;;  :outputs             Output reactives
-;;  :eval-fn             A link function (see below) that evaluates input reactive values
-;;  :error-fn            An error handler function [result ex -> Result]
-;;  :complete-fn         A function [reactive -> nil] called when one of the
+;;   :label               Label for pretty printing
+;;   :inputs              Input reactives
+;;   :outputs             Output reactives
+;;   :eval-fn             A link function (see below) that evaluates input reactive values
+;;   :error-fn            An error handler function [result ex -> Result]
+;;   :complete-fn         A function [reactive -> nil] called when one of the
 ;;                       input reactives becomes completed
-;;  :complete-on-remove  A seq of reactives to be completed when this link is removed
-;;  :level               The level within the reactive network
+;;   :complete-on-remove  A seq of reactives to be completed when this link is removed
+;;   :level               The level within the reactive network
 ;;                       (max level of all input reactives + 1)
 
 ;; Link function:
-;; A function [inputs outputs -> Result] that takes two seqs of input
-;; and output reactives and returns a Result map (see below) or nil,
-;; which denotes that the function gives no clue if its invocation
-;; changed any reactive.
+;;  A function [Result -> Result] that takes a Result map containing
+;;  input values and returns a Result map or nil, which denotes that
+;;  the function gives no clue if its invocation changed any reactive.
 
 ;; Error Handler function:
-;; A function [Link Result -> Result] that takes the Link and the
-;; Result map that the link function returned. It may return a new
-;; Result map (see below) or nil.
+;;  A function [Result -> Result] that takes the Result containing an
+;;  exception. It may return a new Result map (see below) or nil.
+
+;; RVT:
+;;  A nested pair [r [v t]] representing a value v assigned to the
+;;  Reactive r at time t. 
+;;  Something called *rvts is a sequence of those pairs.
 
 ;; Result:
-;; A map returned by a link function with the following entries
-;;  :input-values     A map {reactive -> value} containing the input values
-;;  :output-values    A map {reactive -> value} containing the values for
-;;                    each output reactive, or a vector containing such
-;;                    maps, i.e. {reactive -> [value*]}.                    
-;;  :exception        Exception, or nil if output-values is valid
-;;  :add              A seq of links to be added to the network
-;;  :remove-by        A predicate that matches links to be removed
+;; A map passed into / returned by a link function with the following entries
+;;   :input-reactives  The links input reactives
+;;   :output-reactives The links output reactives
+;;   :input-rvts       A seq of RVTs
+;;   :output-rvts      A seq of RVTs
+;;   :exception        Exception, or nil if output-rvts is valid
+;;   :add              A seq of links to be added to the network
+;;   :remove-by        A predicate that matches links to be removed
 ;;                    from the network
 
 ;; Network:
 ;; A map containing
-;;  :id               A string containing the fqn of the agent var
-;;  :links            Collection of links
-;;  :reactives        Set of reactives (derived)
-;;  :level-map        Map {reactive -> topological-level} (derived)
-;;  :links-map        Map {reactive -> Seq of links} (derived)
+;;   :id               A string containing the fqn of the agent var
+;;   :links            Collection of links
+;;   :reactives        Set of reactives (derived)
+;;   :level-map        Map {reactive -> topological-level} (derived)
+;;   :links-map        Map {reactive -> Seq of links} (derived)
 
 
 ;; ---------------------------------------------------------------------------
-;; Factories
+;; Tools to deal with RVTs
 
 (defn ^:no-doc now
+  "Returns the current epoch time in milliseconds."
   []
   (System/currentTimeMillis))
 
 
+(defn value
+  "Extract the value from an RVT."
+  [[r [v t]]]
+  v)
+
+
+(defn fvalue
+  "Extracts the value from the first of an RVT seq."
+  [rvts]
+  (-> rvts first value))
+
+
+(defn values
+  "Returns a vector with all extracted values from an RVT seq."
+  [rvts]
+  (mapv value rvts))
+
+
+(defn broadcast-value
+  "Produces a RVT seq where the value v is assigned to every Reactive
+  in rs."
+  [v rs]
+  (let [t (now)]
+    (for [r rs] [r [v t]])))
+
+
+(defn zip-values
+  "Produces an RVT seq where values are position-wise assigned to
+  reactives."
+  [vs rs]
+  (let [t (now)]
+    (map (fn [r v] [r [v t]]) rs vs)))
+
+
+(defn enqueue-values
+  "Produces an RVT seq where all values in vs are assigned to the same
+  Reactive r."
+  [vs r]
+  (let [t (now)]
+    (for [v vs] [r [v t]])))
+
+
+;; ---------------------------------------------------------------------------
+;; Tools for implementing Link functions
+
+(defn safely-apply
+  "Applies f to xs, and catches exceptions.
+  Returns a pair of [result exception], at least one of them being nil."
+  [f xs]
+  (try [(apply f xs) nil]
+       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
+
+
+(defn make-result-map
+  "Input is a Result map as it was passed into a Link function. If
+  the exception ex is nil produces broadcasting output-rvts, otherwise
+  adds the exception. Returns an updated Result map."
+  ([input value]
+     (make-result-map input value nil))
+  ([{:keys [output-reactives] :as input} value ex]
+     (assoc input 
+       :output-rvts (if-not ex (broadcast-value value output-reactives))
+       :exception ex)))
+
+
 (defn- default-link-fn
-  "If more than one input, zips values of all inputs into a vector,
-  otherwise take the single value.  Returns a Result map with the
-  extracted value assigned to all output reactives."
-  [rvt-map inputs outputs]
-  (let [v (case (count inputs)
+  "Pass thru of inputs to outputs.
+  If there is more than one input reactive, zips values of all inputs
+  into a vector, otherwise takes the single value.  Returns a Result
+  map with the extracted value assigned to all output reactives."
+  [{:keys [input-rvts input-reactives output-reactives] :as input}]
+  (let [v (case (count input-reactives)
             0 nil
-            1 (-> inputs first rvt-map first)
-            (mapv rvt-map inputs))]
-    {:output-values (into {} (for [o outputs] [o v]))}))
+            1 (fvalue input-rvts)
+            (values input-rvts))]
+    (assoc input :output-rvts (broadcast-value v output-reactives))))
+
+
+;; ---------------------------------------------------------------------------
+;; Factories
 
 
 (defn make-link
@@ -197,9 +271,9 @@
 
 
 (defn ^:no-doc dump-values
-  [label rvs]
-  (if (seq rvs)
-    (dump label (->> rvs
+  [label rvts]
+  (if (seq rvts)
+    (dump label (->> rvts
                      (map (fn [[r [v t]]]
                             (str (:label r) " " v)))
                      (s/join ", ")))))
@@ -383,8 +457,39 @@
   [{:keys [error-fn] :as link} {:keys [exception] :as result}]
   (when exception
     (if error-fn
-      (error-fn link result)
+      (error-fn result)
       (.printStackTrace exception))))
+
+
+(defn- eval-link!
+  "Evaluates one link, returning Result map, or nil if the link function
+  returned nil."
+  [rvt-map {:keys [eval-fn inputs outputs level] :as link}]
+  (let [input        {:link link
+                      :input-reactives inputs
+                      :input-rvts (for [r inputs] [r (rvt-map r)])
+                      :output-reactives outputs
+                      :output-rvts nil}
+        result        (try (eval-fn input)
+                           (catch Exception ex {:exception ex}))
+        error-result  (handle-exception! link (merge input result))]
+    (if result
+      (merge input result error-result))))
+
+
+
+(defn- consume-values!
+  "Consumes all values from reactives that are not already in
+  rvt-map. Returns a map {Reactive -> [value timestamp]}."
+  ([reactives]
+     (consume-values! {} reactives))
+  ([rvt-map reactives]
+     (reduce (fn [rvt-map r]
+               (if (rvt-map r)
+                 rvt-map
+                 (assoc rvt-map r (consume! r))))
+             rvt-map
+             reactives)))
 
 
 (defn- deliver-values!
@@ -394,48 +499,6 @@
     (when-not (completed? r)
       (deliver! r vt)))
   (map first rvt-map))
-
-
-(defn- eval-link!
-  "Evaluates one link, returning Result map, or nil if the link function
-  returned nil."
-  [rvt-map {:keys [eval-fn inputs outputs level] :as link}]
-  (let [result        (try (eval-fn rvt-map inputs outputs)
-                           (catch Exception ex {:exception ex}))
-        inputs        {:input-values (->> inputs
-                                          (map #(vector % (last-value %)))
-                                          (into {}))}
-        error-result  (handle-exception! link result)]
-    (if result
-      (merge inputs result error-result))))
-
-
-
-(defn- sequential-values
-  "Takes a sequence of Result maps and returns a seq of [r [v t]]
-  pairs."
-  [results]
-  (let [timestamp (now)]
-    (->> results
-         (map :output-values)
-         (remove nil?)
-         (mapcat (fn [ov]
-                   (if-not (sequential? ov)
-                     (seq ov)
-                     (mapcat seq ov))))
-         (map (fn [[r v]] [r [v timestamp]])))))
-
-
-(defn- consume-missing!
-  ([reactives]
-     (consume-missing! {} reactives))
-  ([rvt-map reactives]
-     (reduce (fn [rvt-map r]
-               (if (rvt-map r)
-                 rvt-map
-                 (assoc rvt-map r (consume! r))))
-             rvt-map
-             reactives)))
 
 
 (declare push! propagate-downstream!)
@@ -449,7 +512,7 @@
   ([network pending-reactives]
      (propagate! network {} [] pending-reactives))
   ([network rvt-map pending-links pending-reactives]
-     (dump "\n= PROPAGATE" (apply str (repeat 49 "=")))
+     (dump "\n= PROPAGATE" (apply str (repeat 48 "=")))
      (let [network         (remove-completed! network)
            links-map       (:links-map network)
            level-map       (:level-map network)
@@ -471,27 +534,27 @@
            rvt-map         (->> current-links
                                 (mapcat :inputs)
                                 distinct
-                                (consume-missing! rvt-map))
+                                (consume-values! rvt-map))
            results         (->> current-links
                                 (map (partial eval-link! rvt-map))
                                 (remove nil?))
            unchanged?      (empty? results)
            ;; process Result maps 
-           ;; *-rvs is a sequence of reactive value pairs [r [v t]]
-           all-rvs         (sequential-values results)
-           _               (dump-values "VALUES" all-rvs)
+           ;; *-rvts is a sequence of reactive value pairs [r [v t]]
+           all-rvts         (->> results (mapcat :output-rvts))
+           _               (dump-values "VALUES" all-rvts)
            upstream?       (fn [[r _]]
                              (let [r-level (level-map r)]
                                (or (nil? r-level) (< r-level level))))
-           downstream-rvs  (->> all-rvs
+           downstream-rvts (->> all-rvts
                                 (remove upstream?)
                                 (sort-by (comp level-map first) (comparator <)))
-           upstream-rvs    (->> all-rvs (filter upstream?))
+           upstream-rvts   (->> all-rvts (filter upstream?))
            ;; apply network changes returned by link function invocations
            network         (update-from-results! network results)]
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
-       (doseq [[r [v t]] upstream-rvs]
+       (doseq [[r [v t]] upstream-rvts]
          (push! r v t))
     
        (if unchanged?
@@ -499,23 +562,23 @@
          (propagate-downstream! network
                                 rvt-map
                                 pending-links
-                                downstream-rvs)))))
+                                downstream-rvts)))))
 
 
 (defn- propagate-downstream!
   "Propagate values to reactives that are guaranteed to be downstream."
-  [network rvt-map pending-links downstream-rvs]
+  [network rvt-map pending-links downstream-rvts]
   (loop [n network
-         rvs downstream-rvs] 
-    (let [[rvm remaining-rvs] (reduce (fn [[rvm remaining] [r vt]]
-                                        (if (rvm r)
-                                          [rvm (conj remaining [r vt])]
-                                          [(assoc rvm r vt) remaining]))
-                                      [{} []]
-                                      rvs)]
-      (if (seq rvm)
-        (recur (propagate! n rvt-map pending-links (deliver-values! rvm))
-               remaining-rvs)
+         rvts downstream-rvts] 
+    (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
+                                          (if (rvm r)
+                                            [rvm (conj remaining [r vt])]
+                                            [(assoc rvm r vt) remaining]))
+                                        [{} []]
+                                        rvts)]
+      (if (seq rvtm)
+        (recur (propagate! n rvt-map pending-links (deliver-values! rvtm))
+               remaining-rvts)
         (dissoc n :unchanged?)))))
 
 

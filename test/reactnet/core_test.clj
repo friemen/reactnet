@@ -107,11 +107,7 @@
     (is (= [] @results))
     (is (r/pending? e1))
     (r/update-and-propagate!
-     (r/add-links n [(r/make-link "collect" [e1] []
-                                  :eval-fn
-                                  (fn [rvt-map inputs _]
-                                    (swap! results conj (-> inputs first rvt-map first))
-                                    {}))])
+     (r/add-links n [(link (partial swap! results conj) [e1] [])])
      (rv e1 :baz))
     (is (= [:foo :bar :baz] @results))
     (is (not (r/pending? e1)))))
@@ -140,10 +136,9 @@
         numbers (seqstream (range))
         n (network (r/make-link "items" [e1] [e2]
                                 :eval-fn
-                                (fn [rvt-map inputs outputs]
-                                  {:output-values (mapv
-                                                   (partial hash-map (first outputs))
-                                                   (-> inputs first rvt-map first :items))}))
+                                (fn [{:keys [input-rvts output-reactives] :as input}]
+                                  (let [vs (:items (r/fvalue input-rvts))]
+                                    {:output-rvts (r/enqueue-values vs (first output-reactives))})))
                    (link name [e2] [e3])
                    (link vector [numbers e3] [e4])
                    (link (partial swap! results conj) [e4] []))]
@@ -158,7 +153,7 @@
         l2 (link identity [e2] [e3])
         l1 (r/make-link "add-remove" [e1] [e2]
                         :eval-fn
-                        (fn [rvt-map inputs _]
+                        (fn [_]
                           {:add [l2]
                            :remove-by #(= (:outputs %) [e2])}))
         n (network l1)
@@ -194,20 +189,20 @@
         o        (eventstream "o")
         links    (->> (range c)
                       (mapcat (fn [x]
-                             (let [from (* x distance)
-                                   to (+ from distance)
-                                   id (str "[" from " <= x < " to "]")
-                                   filtered-r (eventstream "filtered")]
-                               [(r/make-link id [i] [filtered-r]
-                                              :eval-fn (fn [rvt-map inputs outputs]
-                                                         (let [x (-> inputs first rvt-map first)]
-                                                           (if (and (<= from x) (< x to))
-                                                             {:output-values {(first outputs) x}}
-                                                             {}))))
-                                (r/make-link "merge" [filtered-r] [o])])))
+                                (let [from (* x distance)
+                                      to (+ from distance)
+                                      id (str "[" from " <= x < " to "]")
+                                      filtered-r (eventstream "filtered")]
+                                  [(r/make-link id [i] [filtered-r]
+                                                :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                                           (let [x (r/fvalue input-rvts)]
+                                                             (if (and (<= from x) (< x to))
+                                                               (r/make-result-map input x)
+                                                               {}))))
+                                   (r/make-link "merge" [filtered-r] [o])])))
                       (cons (r/make-link "subscriber" [o] []
-                                         :eval-fn (fn [rvt-map inputs _]
-                                                    (swap! results conj (-> inputs first rvt-map first))
+                                         :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                                    (swap! results conj (r/fvalue input-rvts))
                                                     {}))))
         n        (apply network links)
         values   (repeatedly 1000 #(rand-int (* distance c)))]
@@ -222,9 +217,9 @@
         e4 (eventstream "e4")
         results (atom [])
         n (network (r/make-link "e1,e2->e3" [e1 e2] [e3]
-                                :eval-fn (fn [rvt-map inputs outputs]
-                                           (let [v (->> inputs (map rvt-map) (map first) (reduce +))]
-                                             {:output-values {(first outputs) v}}) )
+                                :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                           (let [v (reduce + (r/values input-rvts))]
+                                             (r/make-result-map input v)) )
                                 :complete-on-remove [e3])
                    (r/make-link "e3->e4" [e3] [e4]
                                 :complete-on-remove [e4])
@@ -263,10 +258,10 @@
                          enqueue (fn [state r]
                                    (switch (update-in state [:queue] conj r)))]
                      (r/make-link "e1->e2" [e1] [e2]
-                                  :eval-fn (fn [rvt-map inputs _]
-                                             (swap! state enqueue (-> inputs first rvt-map first f)))))
+                                  :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                             (swap! state enqueue (f (r/fvalue input-rvts))))))
                    (link (partial swap! results conj) [e2] []))
-        ranges (range 2 100)
+        ranges (range 2 3)
         expected (mapcat #(range %) ranges)
         n-after (->> ranges
                      (map (partial rv e1))
