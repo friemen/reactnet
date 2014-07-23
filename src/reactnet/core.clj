@@ -475,17 +475,15 @@
 
 
 (defn- consume-values!
-  "Consumes all values from reactives that are not already in
-  rvt-map. Returns a map {Reactive -> [value timestamp]}."
-  ([reactives]
-     (consume-values! {} reactives))
-  ([rvt-map reactives]
-     (reduce (fn [rvt-map r]
-               (if (rvt-map r)
-                 rvt-map
-                 (assoc rvt-map r (consume! r))))
-             rvt-map
-             reactives)))
+  "Consumes all values from reactives. 
+  Returns a map {Reactive -> [value timestamp]}."
+  [reactives]
+  (reduce (fn [rvt-map r]
+            (if (rvt-map r)
+              rvt-map
+              (assoc rvt-map r (consume! r))))
+          {}
+          reactives))
 
 
 (defn- deliver-values!
@@ -530,8 +528,7 @@
            rvt-map         (->> current-links
                                 (mapcat :inputs)
                                 distinct
-                                consume-values!
-                                doall)
+                                consume-values!)
            _               (dump-values "INPUTS" rvt-map)
            results         (->> current-links
                                 (map (partial eval-link! rvt-map))

@@ -15,10 +15,12 @@
   (.schedule s f millis TimeUnit/MILLISECONDS))
 
 (defn interval
-  "Schedules a no-arg function to be run immediately and then every
-  millis milliseconds. Return a task."
-  [s millis f]
-  (.scheduleAtFixedRate s f 0 millis TimeUnit/MILLISECONDS))
+  "Schedules a no-arg function to be run immediately (of after an
+  initial-millis delay) and then every rate-millis milliseconds. Returns a task."
+  ([s rate-millis f]
+     (interval s 0 rate-millis f))
+  ([s initial-millis rate-millis f]
+     (.scheduleAtFixedRate s f initial-millis rate-millis TimeUnit/MILLISECONDS)))
 
 (defn tasks
   "Returns a vector of all active/queued tasks."

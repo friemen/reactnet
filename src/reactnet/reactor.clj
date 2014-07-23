@@ -100,7 +100,8 @@
    :max-size max-size})
 
 
-(defn- enqueue [{:keys [queue dequeued max-size] :as q} v]
+(defn- enqueue
+  [{:keys [queue dequeued max-size] :as q} v]
   (assoc q :queue
          (conj (if (>= (count queue) max-size)
                  (pop queue)
@@ -108,13 +109,21 @@
                v)))
 
 
-(defn- dequeue [{:keys [queue dequeued] :as q}]
+(defn- dequeue
+  [{:keys [queue dequeued] :as q}]
   (if-let [v (first queue)]
     (assoc q
       :queue (pop queue)
       :dequeued [v])
     (assoc q
       :dequeued [])))
+
+
+(defn- dequeue-all
+  [{:keys [queue dequeued] :as q}]
+  (assoc q
+    :queue (empty queue)
+    :dequeued (vec queue)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -325,7 +334,7 @@
 
 
 (defn rthrottle
-  [millis max-queue-size reactive]
+  [f millis max-queue-size reactive]
   (let [n-agent (-> reactive network-id network-by-id)
         queue-atom (atom (make-queue max-queue-size))
         new-r (derive-new eventstream
@@ -335,9 +344,9 @@
                               (swap! queue-atom enqueue v)
                               nil))
                           [reactive])]
-    (sched/interval scheduler millis
-                    #(let [vs (:dequeued (swap! queue-atom dequeue))]
-                       (when-not (empty? vs) (push! new-r (first vs)))))
+    (sched/interval scheduler millis millis
+                    #(let [vs (:dequeued (swap! queue-atom dequeue-all))]
+                       (when-not (empty? vs) (push! new-r (f vs)))))
     new-r))
 
 
@@ -366,24 +375,6 @@
 
 
 
-#_ (def c (rconcat e1 e2))
-#_ (def results (atom []))
-#_ (subscribe (partial swap! results conj) c)
-
-#_ (do
-(push! e2 :bar1)
-(push! e2 :bar2)
-(push! e2 :bar3)
-(push! e2 :bar4)
-(push! e1 :foo)
-(push! e1 ::reactnet.core/completed))
-
-(comment
-  (def e1 (eventstream n "e1"))
-  (def e2 (eventstream n "e2"))
-  (def s (eventstream n "s"))
-  (def switched (rswitch s))
-  (subscribe println switched))
 
 
 
