@@ -1,8 +1,10 @@
 (ns reactnet.reactor
   (:require [clojure.string :as s]
             [reactnet.scheduler :as sched]
+            [reactnet.reactives]
             [reactnet.core :refer :all])
-  (:import [clojure.lang PersistentQueue]))
+  (:import [clojure.lang PersistentQueue]
+           [reactnet.reactives Behavior Eventstream SeqStream]))
 
 
 ;; TODOS
@@ -10,38 +12,6 @@
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL
-
-;; ---------------------------------------------------------------------------
-;; A Behavior implementation of the IReactive protocol
-
-
-(defrecord Behavior [n-id label a new?]
-  IReactive
-  (network-id [this]
-    n-id)
-  (last-value [this]
-    (first @a))
-  (available? [r]
-    true)
-  (pending? [r]
-    @new?)
-  (completed? [r]
-    (= ::reactnet.core/completed (first @a)))
-  (consume! [this]
-    (reset! new? false)
-    (dump "CONSUME!" (first @a) "<-" (:label this))
-    @a)
-  (deliver! [this [value timestamp]]
-    (when (not= (first @a) value)
-      (dump "DELIVER!" (:label this) "<-" value)
-      (reset! a [value timestamp])
-      (reset! new? true)))
-  clojure.lang.IDeref
-  (deref [this]
-    (first @a)))
-
-(prefer-method print-method java.util.Map clojure.lang.IDeref)
-(prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
 
 
 (defn behavior
@@ -54,48 +24,6 @@
                 (atom true))))
 
 
-;; ---------------------------------------------------------------------------
-;; A buffered Eventstream implementation of the IReactive protocol
-
-
-(defrecord Eventstream [n-id label a n]
-  IReactive
-  (network-id [this]
-    n-id)
-  (last-value [this]
-    (-> a deref :last-occ first))
-  (available? [this]
-    (seq (:queue @a)))
-  (pending? [this]
-    (available? this))
-  (completed? [this]
-    (and (:completed @a) (empty? (:queue @a))))
-  (consume! [this]
-    (:last-occ (swap! a (fn [{:keys [queue] :as a}]
-                          (when (empty? queue)
-                            (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
-                          (dump "CONSUME!" (ffirst queue) "<-" (:label this))
-                          (assoc a
-                            :last-occ (first queue)
-                            :queue (pop queue))))))
-  (deliver! [this value-timestamp]
-    (let [will-complete (= (first value-timestamp) ::reactnet.core/completed)]
-      (seq (:queue (swap! a (fn [{:keys [completed queue] :as a}]
-                              (if completed
-                                a
-                                (if will-complete
-                                  (assoc a :completed true)
-                                  (if (<= n (count queue))
-                                    (throw (IllegalStateException. (str "Cannot add more than " n " items to stream '" label "'")))
-                                    (do (dump "DELIVER!" (:label this) "<-" (first value-timestamp))
-                                        (assoc a :queue (conj queue value-timestamp))))))))))))
-  clojure.lang.IDeref
-  (deref [this]
-    (let [{:keys [queue last-occ]} @a]
-      (or (first last-occ) (ffirst queue)))))
-
-
-
 (defn eventstream
   [n-agent label]
   (Eventstream. (-> n-agent deref :id)
@@ -105,30 +33,6 @@
                        :completed false})
                 1000))
 
-
-;; ---------------------------------------------------------------------------
-;; An IReactive implementation based on a sequence
-
-(defrecord SeqStream [n-id seq-val-atom eventstream?]
-  IReactive
-  (network-id [this]
-    n-id)
-  (last-value [this]
-    (-> seq-val-atom deref :last-occ first))
-  (available? [this]
-    (-> seq-val-atom deref :seq seq))
-  (pending? [this]
-    (available? this))
-  (completed? [this]
-    (-> seq-val-atom deref :seq nil?))
-  (consume! [this]
-    (:last-occ (swap! seq-val-atom (fn [{:keys [seq]}]
-                                     {:seq (next seq)
-                                      :last-occ [(first seq) (now)]}))))
-  (deliver! [r value-timestamp-pair]
-    (throw (UnsupportedOperationException. "Unable to deliver a value to a seq"))))
-
-
 (defn seqstream
   [n-agent xs]
   (assoc (SeqStream. (-> n-agent deref :id)
@@ -136,32 +40,6 @@
                             :last-occ nil})
                      true)
     :label "seq"))
-
-
-;; ---------------------------------------------------------------------------
-;; Link function factories and execution
-
-(defn make-async-link-fn
-  [f result-fn]
-  (fn [{:keys [input-reactives input-rvts] :as input}]
-    (future (let [n-agent     (-> input-reactives first network-id network-by-id)
-                  [v ex]      (safely-apply f (values input-rvts))
-                  result-map  (result-fn input v ex)]
-              ;; send changes / values to network agent
-              (when (or (seq (:add result-map)) (:remove-by result-map))
-                (send-off n-agent update-from-results! [result-map]))
-              (doseq [[r [v t]] (:output-rvts result-map)]
-                (push! r v))))
-    nil))
-
-
-(defn make-sync-link-fn
-  ([f]
-     (make-sync-link-fn f make-result-map))
-  ([f result-fn]
-     (fn [{:keys [input-rvts] :as input}]
-       (let [[v ex] (safely-apply f (values input-rvts))]
-         (result-fn input v ex)))))
 
 
 (defn async
@@ -174,6 +52,41 @@
   (if-let [f (:async fn-or-map)]
     [make-async-link-fn f]
     [make-sync-link-fn fn-or-map]))
+
+
+
+;; ---------------------------------------------------------------------------
+;; Enqueuing reactives and switching bewteen them
+
+(defn- make-reactive-queue
+  ([output]
+     (make-reactive-queue output nil))
+  ([output reactives]
+     {:queue (vec reactives)
+      :input nil
+      :output output}))
+
+
+(defn- switch-reactive
+  [{:keys [queue input output] :as queue-state} q-atom]
+  (let [uncompleted (remove completed? queue)
+        r           (first uncompleted)]
+    (if (and r (or (nil? input) (completed? input)))
+      (assoc queue-state
+        :queue (vec (rest uncompleted))
+        :input r
+        :add [(make-link "temp" [r] [output]
+                         :complete-fn
+                         (fn [r]
+                           (merge (swap! q-atom switch-reactive q-atom)
+                                  {:remove-by #(= [r] (:inputs %))})))])
+      queue-state)))
+
+
+(defn- enqueue-reactive
+  [queue-state q-atom r]
+  (switch-reactive (update-in queue-state [:queue] conj r) q-atom))
+
 
 
 
@@ -261,30 +174,17 @@
                 reactives)))
 
 
+
 (defn rmapcat'
   [f reactive]
   (let [[make-link-fn f] (unpack-fn f)
         n-agent  (-> reactive network-id network-by-id)
         new-r    (eventstream n-agent "mapcat'")
-        state    (atom {:queue []
-                        :active nil})
-        switch   (fn switch [{:keys [queue active] :as state}]
-                   (if-let [r (first queue)]
-                     (if (or (nil? active) (completed? active))
-                       {:queue (vec (rest queue))
-                        :active r
-                        :add [(make-link "mapcat'-temp" [r] [new-r]
-                                         :completed-fn
-                                         (fn [r]
-                                           (merge (swap! state switch)
-                                                  {:remove-by #(= [r] (:inputs %))})))]}
-                       state)
-                     state))
-        enqueue  (fn [state r]
-                   (switch (update-in state [:queue] conj r)))]
-    (add-links! n-agent (make-link "mapcat'" [reactive] [new-r]
+        state    (atom (make-reactive-queue new-r)) ]
+    (add-links! n-agent (make-link "mapcat'" [reactive] []
                                    :eval-fn (fn [{:keys [input-rvts] :as input}]
-                                              (swap! state enqueue (fvalue input-rvts)))
+                                              (let [r (f (fvalue input-rvts))]
+                                                (swap! state enqueue-reactive state r)))
                                    :complete-on-remove [new-r]))
     new-r))
 
@@ -355,13 +255,15 @@
   [& reactives]
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r   (eventstream n-agent "concat")
-        f       (fn [{:keys [input-rvts] :as input}]
-                  (let [rs (remove completed? reactives)]
-                    (if (seq rs)
-                      (make-result-map input (fvalue input-rvts)))))]
-    (doseq [r reactives]
-      (add-links! n-agent (make-link "concat" [r] [new-r] :eval-fn f)))
+        state   (atom (make-reactive-queue new-r reactives))
+        link    (-> (swap! state switch-reactive state) :add first)]
+    (add-links! n-agent link)
     new-r))
+
+
+(defn rstartwith
+  [start-reactive reactive]
+  (rconcat start-reactive reactive))
 
 
 (defn rswitch
@@ -373,9 +275,9 @@
                            :eval-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
-                               {:remove-by [#(= (:outputs %) [new-r])]
-                                :add [(make-link "switch" [r] [new-r]
-                                                 :eval-fn (make-sync-link-fn identity))]}))))
+                               {:remove-by #(= (:outputs %) [new-r])
+                                :add (if (satisfies? IReactive r)
+                                       [(make-link "switch" [r] [new-r])])}))))
     new-r))
 
 
@@ -402,6 +304,11 @@
     (add-links! n-agent (make-link "subscriber" [reactive] []
                                    :eval-fn (make-link-fn f (constantly {}))))
     reactive))
+
+
+(defn swap-conj!
+  [a reactive]
+  (subscribe (partial swap! a conj) reactive))
 
 
 (defn rdelay
@@ -450,23 +357,26 @@
 (defnetwork n)
 
 
-(def e1 (eventstream n "e1"))
+#_ (def e1 (eventstream n "e1"))
+#_ (def e2 (eventstream n "e2"))
+
+
 #_ (def e2 (rmapcat' #(seqstream n (range %)) e1) )
 #_ (subscribe println e2)
 
 
-(comment
-  (def c (rconcat e1 e2))
-  (def results (atom []))
-  (subscribe (partial swap! results conj) c)
 
-  #_ (do
-       (push! e2 :bar1)
-       (push! e2 :bar2)
-       (push! e2 :bar3)
-       (push! e2 :bar4)
-       (push! e1 :foo)
-       (push! e1 ::reactnet.core/completed)))
+#_ (def c (rconcat e1 e2))
+#_ (def results (atom []))
+#_ (subscribe (partial swap! results conj) c)
+
+#_ (do
+(push! e2 :bar1)
+(push! e2 :bar2)
+(push! e2 :bar3)
+(push! e2 :bar4)
+(push! e1 :foo)
+(push! e1 ::reactnet.core/completed))
 
 (comment
   (def e1 (eventstream n "e1"))

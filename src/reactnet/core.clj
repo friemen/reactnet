@@ -2,8 +2,9 @@
   (:require [clojure.string :as s]))
 
 ;; TODOs
-;; - Add a test to show that one input value can be consumed from many links
-;; - Think about preserving somehow the timestamp when applying a link function:
+;; - The agent based network is an obstacle for unit testing
+;; - The link between reactives and the network by var-lookup is ugly
+;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Create unit test for cyclic deps
 ;; - Handle the initial state of the network
@@ -11,7 +12,6 @@
 ;; - Graphviz visualization of the network
 ;; - Support core.async
 ;; - Support interceptor?
-;; - Make scheduler available in different ns, support at and at-fixed-rate 
 
 
 ;; Ideas about error handling
@@ -73,7 +73,7 @@
 
 ;; RVT:
 ;;  A nested pair [r [v t]] representing a value v assigned to the
-;;  Reactive r at time t. 
+;;  Reactive r at time t.
 ;;  Something called *rvts is a sequence of those pairs.
 
 ;; Result:
@@ -97,7 +97,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Tools to deal with RVTs
+;; Functions to deal with RVTs
 
 (defn ^:no-doc now
   "Returns the current epoch time in milliseconds."
@@ -407,20 +407,17 @@
 
 (defn update-from-results!
   "Takes a network and a seq of result maps and returns an updated
-  network, with links added and removed. Detects dead links and
-  removes them as well. Completes reactives referenced by
+  network, with links added and removed. Completes reactives referenced by
   removed links :complete-on-remove seq."
   [{:keys [links] :as n} results]
-  (let [dead-links      (->> links
-                             (filter dead?))
-        links-to-remove (->> results
+  (let [links-to-remove (->> results
                              (map :remove-by)
                              (remove nil?)
                              (reduce (fn [ls pred]
                                        (->> n :links
                                             (filter pred)
                                             (into ls)))
-                                     (set dead-links)))
+                                     #{}))
         links-to-add    (->> results (mapcat :add) set)]
     (complete-for-links! links-to-remove)
     (if (or (seq links-to-add) (seq links-to-remove))
@@ -443,8 +440,7 @@
                        f (->> r links-map
                               (map :complete-fn)) :when f]
                    (f r))]
-    (update-from-results! n results)))
-
+    (update-from-results! n (cons {:remove-by dead?} results))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -508,10 +504,10 @@
   "Executes one propagation cycle.
   Returns the network."
   ([network]
-     (propagate! network {} [] []))
+     (propagate! network [] []))
   ([network pending-reactives]
-     (propagate! network {} [] pending-reactives))
-  ([network rvt-map pending-links pending-reactives]
+     (propagate! network [] pending-reactives))
+  ([network pending-links pending-reactives]
      (dump "\n= PROPAGATE" (apply str (repeat 48 "=")))
      (let [network         (remove-completed! network)
            links-map       (:links-map network)
@@ -534,7 +530,9 @@
            rvt-map         (->> current-links
                                 (mapcat :inputs)
                                 distinct
-                                (consume-values! rvt-map))
+                                consume-values!
+                                doall)
+           _               (dump-values "INPUTS" rvt-map)
            results         (->> current-links
                                 (map (partial eval-link! rvt-map))
                                 (remove nil?))
@@ -542,7 +540,7 @@
            ;; process Result maps 
            ;; *-rvts is a sequence of reactive value pairs [r [v t]]
            all-rvts         (->> results (mapcat :output-rvts))
-           _               (dump-values "VALUES" all-rvts)
+           _               (dump-values "OUTPUTS" all-rvts)
            upstream?       (fn [[r _]]
                              (let [r-level (level-map r)]
                                (or (nil? r-level) (< r-level level))))
@@ -551,7 +549,9 @@
                                 (sort-by (comp level-map first) (comparator <)))
            upstream-rvts   (->> all-rvts (filter upstream?))
            ;; apply network changes returned by link function invocations
-           network         (update-from-results! network results)]
+           network         (-> network
+                               (update-from-results! results)
+                               (remove-completed!))]
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]
@@ -560,14 +560,13 @@
        (if unchanged?
          (assoc network :unchanged? true)
          (propagate-downstream! network
-                                rvt-map
                                 pending-links
                                 downstream-rvts)))))
 
 
 (defn- propagate-downstream!
   "Propagate values to reactives that are guaranteed to be downstream."
-  [network rvt-map pending-links downstream-rvts]
+  [network pending-links downstream-rvts]
   (loop [n network
          rvts downstream-rvts] 
     (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
@@ -577,7 +576,7 @@
                                         [{} []]
                                         rvts)]
       (if (seq rvtm)
-        (recur (propagate! n rvt-map pending-links (deliver-values! rvtm))
+        (recur (propagate! n pending-links (deliver-values! rvtm))
                remaining-rvts)
         (dissoc n :unchanged?)))))
 
@@ -603,9 +602,6 @@
   [{:keys [links-map] :as n} reactive]
   (deliver! reactive [::completed (now)])
   (update-and-propagate! n nil))
-
-
-
 
 
 ;; ---------------------------------------------------------------------------
@@ -681,6 +677,33 @@
   (let [{:keys [links reactives values]} @n-agent]
     (println (str "Reactives\n" (s/join "\n" (map str-react reactives))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))
+
+
+;; ---------------------------------------------------------------------------
+;; Link function factories and execution
+
+(defn make-async-link-fn
+  [f result-fn]
+  (fn [{:keys [input-reactives input-rvts] :as input}]
+    (future (let [n-agent     (-> input-reactives first network-id network-by-id)
+                  [v ex]      (safely-apply f (values input-rvts))
+                  result-map  (result-fn input v ex)]
+              ;; send changes / values to network agent
+              (when (or (seq (:add result-map)) (:remove-by result-map))
+                (send-off n-agent update-from-results! [result-map]))
+              (doseq [[r [v t]] (:output-rvts result-map)]
+                (push! r v))))
+    nil))
+
+
+(defn make-sync-link-fn
+  ([f]
+     (make-sync-link-fn f make-result-map))
+  ([f result-fn]
+     (fn [{:keys [input-rvts] :as input}]
+       (let [[v ex] (safely-apply f (values input-rvts))]
+         (result-fn input v ex)))))
+
 
 
 :ok
