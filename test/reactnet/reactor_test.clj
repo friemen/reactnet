@@ -73,6 +73,40 @@
     (is (= [:foo] @r))))
 
 
+(deftest filter-test
+  (let [r        (atom [])
+        values   (range 10)
+        expected (filter odd? values)
+        e1       (r/eventstream n "e1")
+        c        (->> e1 (r/rfilter odd?) (r/swap-conj! r))]
+    (apply push-and-wait! (interleave (repeat e1) values))
+    (is (= [1 3 5 7 9] @r))))
+
+
+(deftest map-test
+  (testing "Two eventstreams"
+    (let [r   (atom [])
+          e1  (r/eventstream n "e1")
+          e2  (r/eventstream n "e2")
+          c   (->> (r/rmap + e1 e2) (r/swap-conj! r))]
+      (push-and-wait! e1 1 e1 2 e2 1 e2 2)
+      (is (= [2 4] @r))))
+  (testing "Two behaviors"
+    (let [r   (atom [])
+          b1  (r/behavior n "b1" 0)
+          b2  (r/behavior n "b2" 0)
+          c   (->> (r/rmap + b1 b2) (r/swap-conj! r))]
+      (push-and-wait! b1 1 b1 2 b2 1 b2 2)
+      (is (= [1 2 3 4] @r))))
+  (testing "One eventstream, one behavior"
+    (let [r   (atom [])
+          e   (r/eventstream n "e")
+          b   (r/behavior n "b" 0)
+          c   (->> (r/rmap + e b) (r/swap-conj! r))]
+      (push-and-wait! b 1 b 2 e 1 e 2)
+      (is (= [3 4] @r)))))
+
+
 (deftest mapcat-test
   (let [r   (atom [])
         e1  (r/eventstream n "e1")
@@ -134,6 +168,16 @@
         c   (->> sw r/rswitch (r/swap-conj! r))]
     (push-and-wait! e1 "A" e1 "B" e2 "C" sw e2 sw e1)
     (is (= ["C" "A" "B"] @r))))
+
+
+(deftest take-test
+  (let [r   (atom [])
+        e1  (r/eventstream n "e1")
+        c   (->> e1 (r/rtake 2) (r/swap-conj! r))]
+    (push-and-wait! e1 :foo e1 :bar e1 :baz)
+    (is (= [:foo :bar] @r))
+    (is (rn/completed? c))
+    (is (rn/pending? e1))))
 
 
 (deftest throttle-test

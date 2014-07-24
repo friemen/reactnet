@@ -141,6 +141,7 @@
 
 
 (defn halt!
+  "Cancel all scheduled tasks."
   []
   (sched/cancel-all scheduler))
 
@@ -202,16 +203,11 @@
 
 (defn rbuffer
   [no reactive]  
-  (let [b   (atom {:queue []
-                   :dequeued nil})
+  (let [b   (atom {:queue [] :dequeued nil})
         enq (fn [{:keys [queue] :as q} x]
               (if (>= (count queue) no)
-                (assoc q
-                  :queue [x]
-                  :dequeued queue)
-                (assoc q
-                  :queue (conj queue x)
-                  :dequeued nil)))]
+                (assoc q :queue [x] :dequeued queue)
+                (assoc q :queue (conj queue x) :dequeued nil)))]
     (derive-new eventstream "buffer" [reactive]
                 :link-fn
                 (fn [{:keys [input-rvts] :as input}]
@@ -271,7 +267,6 @@
                 (make-link-fn f make-result-map))))
 
 
-
 (defn rmapcat'
   [f reactive]
   (let [[make-link-fn f] (unpack-fn f)
@@ -319,19 +314,6 @@
                               make-result-map))))
 
 
-(defn rtake
-  [no reactive]
-  (let [c (atom no)]
-    (derive-new eventstream "take" [reactive]
-                :link-fn
-                (fn [{:keys [input-rvts] :as input}]
-                  (let [v (fvalue input-rvts)]
-                    (if (> @c 0)
-                      (do (swap! c dec)
-                          (make-result-map input v))
-                      {}))))))
-
-
 (defn rstartwith
   [start-reactive reactive]
   (rconcat start-reactive reactive))
@@ -366,6 +348,24 @@
 (defn swap-conj!
   [a reactive]
   (subscribe (partial swap! a conj) reactive))
+
+
+(defn rtake
+  [no reactive]
+  (let [n-agent (-> reactive network-id network-by-id)
+        new-r   (eventstream n-agent "take")
+        c       (atom no)]
+    (add-links! n-agent
+                (make-link "take" [reactive] [new-r]
+                           :link-fn
+                           (fn [{:keys [input-rvts] :as input}]
+                             (let [r (make-result-map input (fvalue input-rvts))]
+                               (if (>= 0 (swap! c dec))
+                                 (assoc r
+                                   :remove-by #(= (:outputs %) [new-r]))
+                                 r)))
+                           :complete-on-remove [new-r]))
+    new-r))
 
 
 (defn rthrottle
