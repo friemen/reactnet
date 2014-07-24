@@ -1,5 +1,8 @@
 (ns reactnet.reactor
-  (:require [clojure.string :as s]
+  "Factories and combinators for FRP style behaviors and eventstreams."
+  (:refer-clojure :exclude [concat count delay filter merge map mapcat reduce remove take])
+  (:require [clojure.core :as c]
+            [clojure.string :as s]
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
             [reactnet.core :refer :all])
@@ -79,7 +82,7 @@
 
 (defn- switch-reactive
   [{:keys [queue input output] :as queue-state} q-atom]
-  (let [uncompleted (remove completed? queue)
+  (let [uncompleted (c/remove completed? queue)
         r           (first uncompleted)]
     (if (and r (or (nil? input) (completed? input)))
       (assoc queue-state
@@ -88,8 +91,8 @@
         :add [(make-link "temp" [r] [output]
                          :complete-fn
                          (fn [_ r]
-                           (merge (swap! q-atom switch-reactive q-atom)
-                                  {:remove-by #(= [r] (:inputs %))})))])
+                           (c/merge (swap! q-atom switch-reactive q-atom)
+                                    {:remove-by #(= [r] (:inputs %))})))])
       queue-state)))
 
 
@@ -113,7 +116,7 @@
 (defn- enqueue
   [{:keys [queue dequeued max-size] :as q} v]
   (assoc q :queue
-         (conj (if (>= (count queue) max-size)
+         (conj (if (>= (c/count queue) max-size)
                  (pop queue)
                  queue)
                v)))
@@ -153,7 +156,7 @@
   (seqstream n-agent [x]))
 
 
-(defn rsample
+(defn sample
   [n-agent millis f-or-ref-or-value]
   (let [sample-fn (cond
                    (fn? f-or-ref-or-value)
@@ -211,16 +214,16 @@
                     {:remove-by #(= (:outputs %) [new-r])
                      :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
                      :output-rvts (assign-value (fvalue input-rvts) new-r)}))
-        links   (->> reactives (map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
+        links   (->> reactives (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
     (apply (partial add-links! n-agent) links)
     new-r))
 
 
-(defn rbuffer
+(defn buffer
   [no reactive]  
   (let [b   (atom {:queue [] :dequeued nil})
         enq (fn [{:keys [queue] :as q} x]
-              (if (>= (count queue) no)
+              (if (>= (c/count queue) no)
                 (assoc q :queue [x] :dequeued queue)
                 (assoc q :queue (conj queue x) :dequeued nil)))]
     (derive-new eventstream "buffer" [reactive]
@@ -235,7 +238,7 @@
                       {:output-rvts (assign-value vs (-> link :outputs first))}))))))
 
 
-(defn rconcat
+(defn concat
   [& reactives]
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r   (eventstream n-agent "concat")
@@ -245,7 +248,7 @@
     new-r))
 
 
-(defn rcount
+(defn count
   [reactive]
   (let [c (atom 0)]
     (derive-new eventstream "count" [reactive]
@@ -270,7 +273,7 @@
                   nil)))))
 
 
-(defn rdelay
+(defn delay
   [millis reactive]
   (derive-new eventstream "delay" [reactive]
               :link-fn
@@ -281,7 +284,7 @@
                   nil))))
 
 
-(defn rfilter
+(defn filter
   [pred reactive]
   (let [[make-link-fn f] (unpack-fn pred)]
     (derive-new eventstream "filter" [reactive]
@@ -293,12 +296,12 @@
                                                      ex)))))))
 
 
-(defn rhold
+(defn hold
   [reactive]
   (derive-new behavior "hold" [reactive]))
 
 
-(defn rmap
+(defn map
   [f & reactives]
   (let [[make-link-fn f] (unpack-fn f)]
     (derive-new eventstream "map" reactives
@@ -306,7 +309,7 @@
                 (make-link-fn f make-result-map))))
 
 
-(defn rmapcat'
+(defn mapcat'
   [f reactive]
   (let [[make-link-fn f] (unpack-fn f)
         n-agent  (-> reactive network-id network-by-id)
@@ -321,7 +324,7 @@
     new-r))
 
 
-(defn rmapcat
+(defn mapcat
   [f & reactives]
   (let [[make-link-fn f] (unpack-fn f)]
     (derive-new eventstream "mapcat" reactives
@@ -333,16 +336,16 @@
                                     :exception ex))))))
 
 
-(defn rmerge
+(defn merge
   [& reactives]
   (let [n-agent (-> reactives first network-id network-by-id)
         new-r   (eventstream n-agent "merge")
-        links   (->> reactives (map #(make-link "merge" [%] [new-r])))]
+        links   (->> reactives (c/map #(make-link "merge" [%] [new-r])))]
     (apply (partial add-links! n-agent) links)
     new-r))
 
 
-(defn rreduce
+(defn reduce
   [f initial-value & reactives]
   (let [[make-link-fn f] (unpack-fn f)
         accu             (atom initial-value)]
@@ -353,12 +356,12 @@
                               make-result-map))))
 
 
-(defn rstartwith
+(defn startwith
   [start-reactive reactive]
-  (rconcat start-reactive reactive))
+  (concat start-reactive reactive))
 
 
-(defn rswitch
+(defn switch
   [reactive]
   (let [n-agent (-> reactive network-id network-by-id)
         new-r   (eventstream n-agent "switch")]
@@ -389,7 +392,7 @@
   (subscribe (partial swap! a conj) reactive))
 
 
-(defn rtake
+(defn take
   [no reactive]
   (let [n-agent (-> reactive network-id network-by-id)
         new-r   (eventstream n-agent "take")
@@ -407,7 +410,7 @@
     new-r))
 
 
-(defn rthrottle
+(defn throttle
   [f millis max-queue-size reactive]
   (let [n-agent (-> reactive network-id network-by-id)
         queue-atom (atom (make-queue max-queue-size))
