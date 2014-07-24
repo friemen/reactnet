@@ -148,6 +148,11 @@
 ;; ---------------------------------------------------------------------------
 ;; More constructors of reactives
 
+(defn just
+  [n-agent x]
+  (seqstream n-agent [x]))
+
+
 (defn rsample
   [n-agent millis f-or-ref-or-value]
   (let [sample-fn (cond
@@ -165,6 +170,16 @@
         task       (sched/interval scheduler millis
                                    #(push! new-r (sample-fn)))]
     new-r))
+
+
+(defn timer
+  [n-agent millis]
+  (let [ticks (atom 0)
+        new-r (eventstream n-agent "timer")]
+    (sched/interval scheduler millis millis
+                    #(push! new-r (swap! ticks inc)))
+    new-r))
+
 
 
 ;; ---------------------------------------------------------------------------
@@ -391,72 +406,6 @@
                  :link-fn-factory [sync, future, go]
                  :result-fn (fn [])
                  :error-fn (fn []) }))
-
-
-
-;; ---------------------------------------------------------------------------
-;; Example network
-
-
-(defnetwork n)
-
-
-#_ (def e1 (eventstream n "e1"))
-#_ (def e2 (eventstream n "e2"))
-
-
-#_ (def e2 (rmapcat' #(seqstream n (range %)) e1) )
-#_ (subscribe println e2)
-
-
-
-
-
-
-#_ (def r (rmap + e1 e2))
-#_ (subscribe #(println %) r)
-
-#_ (def f (->> e1 (rtake 3) (rfilter (partial = "foo"))))
-#_ (subscribe println
-           (rmerge f e2))
-
-
-
-
-#_ (def b (->> e1
-            (rbuffer 3)
-            (rdelay 3000)
-            (subscribe (fn [value] (println value)))))
-
-#_ (def c (->> e1 (rmapcat #(repeat 3 %)) (subscribe #(println %))))
-
-#_ (->> (constantly "foo")
-     (rsample n 1000)
-     (subscribe (fn [value] (println value))))
-
-(comment
-  (def x (behavior n "x" nil))
-  (def y (behavior n "y" 2))
-  (def x+y (rmap + x y))
-  (def zs (->> (rmap * x x+y)
-               (rreduce conj [])))
-
-
-  (doseq [i (range 10)]
-    (push! x i))
-  (->> x+y (rdelay 3000) (subscribe #(println %))))
-
-(comment
-  (def data {:name "bar" :addresses [{:street "1"}
-                                     {:street "2"}
-                                     {:street "3"}]})
-
-  (def p (behavior n "p"))
-  (def a (rmapcat :addresses p))
-  (def pname (rmap :name p))
-  (def pnameb (rhold pname))
-  (def pair (rmap vector pnameb a))
-  (subscribe #(println "OUTPUT" %) pair))
 
 
 

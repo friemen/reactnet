@@ -57,10 +57,10 @@
 ;;   :link-fn             A link function (see below) that evaluates input reactive values
 ;;   :error-fn            An error handler function [result ex -> Result]
 ;;   :complete-fn         A function [reactive -> nil] called when one of the
-;;                       input reactives becomes completed
+;;                        input reactives becomes completed
 ;;   :complete-on-remove  A seq of reactives to be completed when this link is removed
 ;;   :level               The level within the reactive network
-;;                       (max level of all input reactives + 1)
+;;                        (max level of all input reactives + 1)
 
 ;; Link function:
 ;;  A function [Result -> Result] that takes a Result map containing
@@ -78,22 +78,22 @@
 
 ;; Result:
 ;; A map passed into / returned by a link function with the following entries
-;;   :input-reactives  The links input reactives
-;;   :output-reactives The links output reactives
-;;   :input-rvts       A seq of RVTs
-;;   :output-rvts      A seq of RVTs
-;;   :exception        Exception, or nil if output-rvts is valid
-;;   :add              A seq of links to be added to the network
-;;   :remove-by        A predicate that matches links to be removed
-;;                    from the network
+;;   :input-reactives     The links input reactives
+;;   :output-reactives    The links output reactives
+;;   :input-rvts          A seq of RVTs
+;;   :output-rvts         A seq of RVTs
+;;   :exception           Exception, or nil if output-rvts is valid
+;;   :add                 A seq of links to be added to the network
+;;   :remove-by           A predicate that matches links to be removed
+;;                        from the network
 
 ;; Network:
 ;; A map containing
-;;   :id               A string containing the fqn of the agent var
-;;   :links            Collection of links
-;;   :reactives        Set of reactives (derived)
-;;   :level-map        Map {reactive -> topological-level} (derived)
-;;   :links-map        Map {reactive -> Seq of links} (derived)
+;;   :id                  A string containing the fqn of the agent var
+;;   :links               Collection of links
+;;   :reactives           Set of reactives (derived)
+;;   :level-map           Map {Reactive -> topological-level} (derived)
+;;   :links-map           Map {Reactive -> Seq of links} (derived)
 
 
 ;; ---------------------------------------------------------------------------
@@ -218,6 +218,7 @@
   [r]
   (str (if (completed? r) "C " "  ") (:label r) ":" (pr-str (last-value r))))
 
+(declare dead?)
 
 (defn ^:no-doc str-link  
   [l]
@@ -225,8 +226,10 @@
        " [" (s/join " " (map :label (:inputs l)))
        "] -- " (:label l) " --> ["
        (s/join " " (mapv :label (:outputs l)))
-       "] " (if (every? available? (:inputs l))
-              "READY" "incomplete")))
+       "] " (cond
+             (every? available? (:inputs l)) "READY"
+             (dead? l) "DEAD"
+             :else "incomplete")))
 
 
 (defn ^:no-doc str-rvalue
@@ -338,10 +341,10 @@
 
 
 (defn ^:no-doc dead?
-  "Returns true for a link if at least one of it's inputs is completed
-  or all outputs are completed. Empty outputs does not count as 'all
-  outputs completed'."
-  [{:keys [inputs outputs] :as link}]
+  "Returns true for a link if has not inputs, or at least one of it's
+  inputs is completed, or all outputs are completed. Empty outputs does
+  not count as 'all outputs completed'."
+  [{:keys [inputs outputs]}]
   (or (empty? inputs)
       (some completed? inputs)
       (and (seq outputs) (every? completed? outputs))))
@@ -375,8 +378,8 @@
 (declare push!)
 
 (defn- complete-for-links!
-  "Completes all reactives contained in the :complete-on-remove seq of
-  the given links."
+  "Asynchronously completes all reactives contained in
+  the :complete-on-remove seq of the given links."
   [links]
   (doseq [r (->> links
                  (mapcat :complete-on-remove))]
@@ -394,8 +397,8 @@
 
 (defn update-from-results!
   "Takes a network and a seq of result maps and returns an updated
-  network, with links added and removed. Completes reactives referenced by
-  removed links :complete-on-remove seq."
+  network, with links added and removed. Completes reactives
+  referenced by removed links :complete-on-remove seq."
   [{:keys [links] :as n} results]
   (let [links-to-remove (->> results
                              (map :remove-by)
@@ -411,29 +414,15 @@
     (if (or (seq links-to-add) (seq links-to-remove))
       
       (do (when (seq links-to-remove)
-            (dump-links "REMOVING LINKS" links-to-remove))
+            (dump-links "REMOVE" links-to-remove))
           (when (seq links-to-add)
-            (dump-links "ADDING LINKS" links-to-add))
+            (dump-links "ADD" links-to-add))
           
           (->> n :links
                (remove links-to-remove)
                (concat links-to-add)
                (rebuild n)))
       n)))
-
-
-(defn- eval-complete-fns!
-  "Detects all completed input reactives, calls complete-fn for each
-  link and reactive and returns the results."
-  [{:keys [reactives links links-map] :as n}]
-  (let [results  (for [r (->> links
-                              (mapcat :inputs)
-                              set
-                              (filter completed?))
-                       [l f] (->> r links-map
-                                 (map (juxt identity :complete-fn))) :when f]
-                   (f l r))]
-    results))
 
 
 ;; ---------------------------------------------------------------------------
@@ -466,21 +455,33 @@
       (merge input result error-result))))
 
 
+(defn- eval-complete-fns!
+  "Detects all completed input reactives, calls complete-fn for each
+  link and reactive and returns the results."
+  [{:keys [reactives links links-map] :as n}]
+  (let [results  (for [r (->> links
+                              (mapcat :inputs)
+                              set
+                              (filter completed?))
+                       [l f] (->> r links-map
+                                 (map (juxt identity :complete-fn))) :when f]
+                   (f l r))]
+    (remove nil? results)))
+
 
 (defn- consume-values!
   "Consumes all values from reactives. 
   Returns a map {Reactive -> [value timestamp]}."
   [reactives]
   (reduce (fn [rvt-map r]
-            (if (rvt-map r)
-              rvt-map
-              (assoc rvt-map r (consume! r))))
+            (assoc rvt-map r (consume! r)))
           {}
           reactives))
 
 
 (defn- deliver-values!
-  "Updates all reactives from the reactive-values map and returns this map."
+  "Updates all reactives from the reactive-values map and returns this
+  map."
   [rvt-map]
   (doseq [[r vt] rvt-map]
     (when-not (completed? r)
@@ -492,8 +493,7 @@
 
 
 (defn ^:no-doc propagate!
-  "Executes one propagation cycle.
-  Returns the network."
+  "Executes one propagation cycle. Returns the network."
   ([network]
      (propagate! network [] []))
   ([network pending-reactives]
@@ -508,7 +508,7 @@
                                 (concat pending-links)
                                 (sort-by :level (comparator <))
                                 distinct)
-           _               (dump-links "NEXT" links)
+           _               (dump-links "CANDIDATES" links)
            available-links (->> links
                                 (filter ready?)
                                 doall)
@@ -524,11 +524,11 @@
                                 distinct
                                 consume-values!)
            _               (dump-values "INPUTS" rvt-map)
-           eval-results    (->> current-links
+           link-results    (->> current-links
                                 (map (partial eval-link! rvt-map))
                                 (remove nil?))
            compl-results   (eval-complete-fns! network)
-           results         (concat eval-results compl-results)
+           results         (concat link-results compl-results)
            unchanged?      (empty? results)
            
            ;; apply network changes returned by link and complete functions

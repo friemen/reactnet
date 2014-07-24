@@ -28,6 +28,13 @@
                        :completed false})
                 1000))
 
+(defmacro with-network
+  [n & exprs]
+  `(let [nbi-fn# (var-get #'reactnet.core/network-by-id)]
+     (alter-var-root #'reactnet.core/network-by-id (fn [~'v] (constantly (agent ~n))))
+     ~@exprs
+     (alter-var-root #'reactnet.core/network-by-id (fn [~'v] nbi-fn#))))
+
 
 (defmacro link
   [f inputs outputs]
@@ -212,27 +219,27 @@
 
 (deftest complete-on-remove-test
   (let [e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        e3 (eventstream "e3")
-        e4 (eventstream "e4")
-        results (atom [])
-        n (network (rn/make-link "e1,e2->e3" [e1 e2] [e3]
-                                :link-fn (fn [{:keys [input-rvts] :as input}]
-                                           (let [v (reduce + (rn/values input-rvts))]
-                                             (rn/make-result-map input v)) )
-                                :complete-on-remove [e3])
-                   (rn/make-link "e3->e4" [e3] [e4]
-                                :complete-on-remove [e4])
-                   (link (partial swap! results conj) [e4] []))]
-    (alter-var-root #'reactnet.core/network-by-id (fn [_] (constantly (agent n))))
-    (rn/update-and-propagate! n {e1 [1 (rn/now)] e2 [2 (rn/now)]})
-    (is (= [3] @results))
-    (rn/complete-and-propagate! n e1)
-    (Thread/sleep 300)
-    (is (rn/completed? e1))
-    (is (not (rn/completed? e2)))
-    (is (rn/completed? e3))
-    (is (rn/completed? e4))))
+          e2 (eventstream "e2")
+          e3 (eventstream "e3")
+          e4 (eventstream "e4")
+          results (atom [])
+          n (network (rn/make-link "e1,e2->e3" [e1 e2] [e3]
+                                   :link-fn (fn [{:keys [input-rvts] :as input}]
+                                              (let [v (reduce + (rn/values input-rvts))]
+                                                (rn/make-result-map input v)) )
+                                   :complete-on-remove [e3])
+                     (rn/make-link "e3->e4" [e3] [e4]
+                                   :complete-on-remove [e4])
+                     (link (partial swap! results conj) [e4] []))]
+      (with-network n
+          (rn/update-and-propagate! n {e1 [1 (rn/now)] e2 [2 (rn/now)]})
+          (is (= [3] @results))
+          (rn/complete-and-propagate! n e1)
+          (Thread/sleep 300)
+          (is (rn/completed? e1))
+          (is (not (rn/completed? e2)))
+          (is (rn/completed? e3))
+          (is (rn/completed? e4)))))
 
 
 (deftest flatmap-test

@@ -30,7 +30,51 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Tests
+;; Tests of special reactive factories
+
+(deftest sample-test
+  (testing "Sample constant value"
+    (let [r   (atom [])
+          s   (->> :foo (r/rsample n 100) (r/swap-conj! r))]
+      (wait 500)
+      (is (<= 4 (count @r)))
+      (is (= [:foo :foo :foo :foo] (take 4 @r)))))
+  (testing "Sample by invoking a function"
+    (let [r   (atom [])
+          s   (->> #(count @r) (r/rsample n 100) (r/swap-conj! r))]
+      (wait 500)
+      (is (<= 4 (count @r)))
+      (is (= [0 1 2 3] (take 4 @r)))))
+  (testing "Sample from a ref"
+    (let [r   (atom [])
+          a   (atom 0)
+          s   (->> a (r/rsample n 100) (r/swap-conj! r))]
+      (wait 150)
+      (reset! a 1)
+      (wait 400)
+      (is (<= 4 (count @r)))
+      (is (= [0 0 1 1] (take 4 @r))))))
+
+
+(deftest timer-test
+  (let [r   (atom [])
+        t   (->> (r/timer n 200) (r/swap-conj! r))]
+    (wait 1000)
+    (is (= [1 2 3 4] (take 4 @r)))))
+
+
+(deftest just-test
+  (let [r  (atom [])
+        j  (->> (r/just n 42) (r/swap-conj! r))]
+    (is (rn/pending? j))
+    (send-off n rn/update-and-propagate! nil)
+    (wait)
+    (is (= [42] @r))
+    (is (rn/completed? j))))
+
+
+;; ---------------------------------------------------------------------------
+;; Tests of combinators
 
 (deftest amb-test
   (let [r   (atom [])
@@ -38,7 +82,10 @@
         e2  (r/eventstream n "e2")
         c   (->> (r/amb e1 e2) (r/swap-conj! r))]
     (push-and-wait! e2 :foo e1 :bar e2 :baz)
-    (is (= [:foo :baz] @r))))
+    (is (= [:foo :baz] @r))
+    (complete! e2)
+    (wait)
+    (is (rn/completed? c))))
 
 
 (deftest buffer-test
@@ -134,30 +181,6 @@
     (is (r/behavior? b))
     (apply push-and-wait! (interleave (repeat e1) values))
     (is (= @b (reduce + values)))))
-
-
-(deftest sample-test
-  (testing "Sample constant value"
-    (let [r   (atom [])
-          s   (->> :foo (r/rsample n 100) (r/swap-conj! r))]
-      (wait 500)
-      (is (<= 4 (count @r)))
-      (is (= [:foo :foo :foo :foo] (take 4 @r)))))
-  (testing "Sample by invoking a function"
-    (let [r   (atom [])
-          s   (->> #(count @r) (r/rsample n 100) (r/swap-conj! r))]
-      (wait 500)
-      (is (<= 4 (count @r)))
-      (is (= [0 1 2 3] (take 4 @r)))))
-  (testing "Sample from a ref"
-    (let [r   (atom [])
-          a   (atom 0)
-          s   (->> a (r/rsample n 100) (r/swap-conj! r))]
-      (wait 150)
-      (reset! a 1)
-      (wait 400)
-      (is (<= 4 (count @r)))
-      (is (= [0 0 1 1] (take 4 @r))))))
 
 
 (deftest switch-test
