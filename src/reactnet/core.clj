@@ -54,7 +54,7 @@
 ;;   :label               Label for pretty printing
 ;;   :inputs              Input reactives
 ;;   :outputs             Output reactives
-;;   :eval-fn             A link function (see below) that evaluates input reactive values
+;;   :link-fn             A link function (see below) that evaluates input reactive values
 ;;   :error-fn            An error handler function [result ex -> Result]
 ;;   :complete-fn         A function [reactive -> nil] called when one of the
 ;;                       input reactives becomes completed
@@ -123,6 +123,13 @@
   (mapv value rvts))
 
 
+(defn assign-value
+  "Produces a sequence with exactly one RVT pair assigned to Reactive
+  r."
+  ([v r]
+     [[r [v (now)]]]))
+
+
 (defn broadcast-value
   "Produces a RVT seq where the value v is assigned to every Reactive
   in rs."
@@ -152,7 +159,7 @@
 ;; Factories
 
 
-(defn- default-link-fn
+(defn default-link-fn
   "Pass thru of inputs to outputs.
   If there is more than one input reactive, zips values of all inputs
   into a vector, otherwise takes the single value.  Returns a Result
@@ -169,26 +176,26 @@
   "Creates a new Link. Label is an arbitrary text, inputs and outputs
   are sequences of reactives. 
   
-  The eval-fn is a Link function [inputs outputs -> Result] which is
+  The link-fn is a Link function [inputs outputs -> Result] which is
   called to produce a result from inputs (if all inputs are
   available). Defaults to default-link-fn.
   
   The error-fn is a function [Link Result -> Result] which is called when
   an exception was thrown by the Link function. Defaults to nil.
 
-  The complete-fn is a function [Reactive -> Result] which is called for
+  The complete-fn is a function [Link Reactive -> Result] which is called for
   each input reactive that completes. Defaults to nil.
 
   The sequence complete-on-remove contains all reactives that should be
   completed when this Link is removed from the network."
   [label inputs outputs
-   & {:keys [eval-fn error-fn complete-fn complete-on-remove]
-      :or {eval-fn default-link-fn}}]
+   & {:keys [link-fn error-fn complete-fn complete-on-remove]
+      :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
   {:label label
    :inputs inputs
    :outputs outputs
-   :eval-fn eval-fn
+   :link-fn link-fn
    :error-fn error-fn
    :complete-fn complete-fn
    :complete-on-remove complete-on-remove
@@ -242,8 +249,8 @@
 
 
 (defn ^:no-doc dump-links
-  [links]
-  (dump (apply str (repeat 60 \-)))
+  [label links]
+  (dump "-" label (apply str (repeat (- 57 (count label)) \-)))
   (dump (->> links (map str-link) (s/join "\n")))
   (dump (apply str (repeat 60 \-))))
 
@@ -334,7 +341,7 @@
   "Returns true for a link if at least one of it's inputs is completed
   or all outputs are completed. Empty outputs does not count as 'all
   outputs completed'."
-  [{:keys [inputs outputs]}]
+  [{:keys [inputs outputs] :as link}]
   (or (empty? inputs)
       (some completed? inputs)
       (and (seq outputs) (every? completed? outputs))))
@@ -365,13 +372,15 @@
   (rebuild n (concat links new-links)))
 
 
+(declare push!)
+
 (defn- complete-for-links!
   "Completes all reactives contained in the :complete-on-remove seq of
   the given links."
   [links]
   (doseq [r (->> links
                  (mapcat :complete-on-remove))]
-    (deliver! r [::completed (now)])))
+    (push! r ::completed)))
 
 
 (defn remove-links
@@ -391,6 +400,7 @@
   (let [links-to-remove (->> results
                              (map :remove-by)
                              (remove nil?)
+                             (cons dead?)
                              (reduce (fn [ls pred]
                                        (->> n :links
                                             (filter pred)
@@ -399,26 +409,31 @@
         links-to-add    (->> results (mapcat :add) set)]
     (complete-for-links! links-to-remove)
     (if (or (seq links-to-add) (seq links-to-remove))
-      (->> n :links
-           (remove links-to-remove)
-           (concat links-to-add)
-           (rebuild n))
+      
+      (do (when (seq links-to-remove)
+            (dump-links "REMOVING LINKS" links-to-remove))
+          (when (seq links-to-add)
+            (dump-links "ADDING LINKS" links-to-add))
+          
+          (->> n :links
+               (remove links-to-remove)
+               (concat links-to-add)
+               (rebuild n)))
       n)))
 
 
-(defn- remove-completed!
+(defn- eval-complete-fns!
   "Detects all completed input reactives, calls complete-fn for each
-  link and returns a network updated with the results of the
-  complete-fn invocations."
+  link and reactive and returns the results."
   [{:keys [reactives links links-map] :as n}]
   (let [results  (for [r (->> links
                               (mapcat :inputs)
                               set
                               (filter completed?))
-                       f (->> r links-map
-                              (map :complete-fn)) :when f]
-                   (f r))]
-    (update-from-results! n (cons {:remove-by dead?} results))))
+                       [l f] (->> r links-map
+                                 (map (juxt identity :complete-fn))) :when f]
+                   (f l r))]
+    results))
 
 
 ;; ---------------------------------------------------------------------------
@@ -438,13 +453,13 @@
 (defn- eval-link!
   "Evaluates one link, returning Result map, or nil if the link function
   returned nil."
-  [rvt-map {:keys [eval-fn inputs outputs level] :as link}]
+  [rvt-map {:keys [link-fn inputs outputs level] :as link}]
   (let [input        {:link link
                       :input-reactives inputs
                       :input-rvts (for [r inputs] [r (rvt-map r)])
                       :output-reactives outputs
                       :output-rvts nil}
-        result        (try (eval-fn input)
+        result        (try (link-fn input)
                            (catch Exception ex {:exception ex}))
         error-result  (handle-exception! link (merge input result))]
     (if result
@@ -473,7 +488,7 @@
   (map first rvt-map))
 
 
-(declare push! propagate-downstream!)
+(declare propagate-downstream!)
 
 
 (defn ^:no-doc propagate!
@@ -485,36 +500,40 @@
      (propagate! network [] pending-reactives))
   ([network pending-links pending-reactives]
      (dump "\n= PROPAGATE" (apply str (repeat 48 "=")))
-     (let [network         (remove-completed! network)
-           links-map       (:links-map network)
+     (dump "PENDING:"(->> pending-reactives (map :label) (s/join ", ")))
+     (let [links-map       (:links-map network)
            level-map       (:level-map network)
            links           (->> pending-reactives
                                 (mapcat links-map)
                                 (concat pending-links)
                                 (sort-by :level (comparator <))
                                 distinct)
-           _               (dump-links links)
+           _               (dump-links "NEXT" links)
            available-links (->> links
                                 (filter ready?)
                                 doall)
-           level           (-> available-links first :level)
+           level           (or (-> available-links first :level) 0)
            same-level?     (fn [l] (= (:level l) level))
            current-links   (->> available-links
                                 (filter same-level?))
            pending-links   (->> available-links
                                 (remove same-level?))
+           
            rvt-map         (->> current-links
                                 (mapcat :inputs)
                                 distinct
                                 consume-values!)
            _               (dump-values "INPUTS" rvt-map)
-           results         (->> current-links
+           eval-results    (->> current-links
                                 (map (partial eval-link! rvt-map))
                                 (remove nil?))
+           compl-results   (eval-complete-fns! network)
+           results         (concat eval-results compl-results)
            unchanged?      (empty? results)
-           ;; process Result maps 
-           ;; *-rvts is a sequence of reactive value pairs [r [v t]]
-           all-rvts         (->> results (mapcat :output-rvts))
+           
+           ;; apply network changes returned by link and complete functions
+           network         (update-from-results! network results)
+           all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
            upstream?       (fn [[r _]]
                              (let [r-level (level-map r)]
@@ -522,11 +541,7 @@
            downstream-rvts (->> all-rvts
                                 (remove upstream?)
                                 (sort-by (comp level-map first) (comparator <)))
-           upstream-rvts   (->> all-rvts (filter upstream?))
-           ;; apply network changes returned by link function invocations
-           network         (-> network
-                               (update-from-results! results)
-                               (remove-completed!))]
+           upstream-rvts   (->> all-rvts (filter upstream?))]
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]

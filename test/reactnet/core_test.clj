@@ -32,7 +32,7 @@
 (defmacro link
   [f inputs outputs]
   `(rn/make-link (str '~f) ~inputs ~outputs
-                :eval-fn (rn/make-sync-link-fn ~f)))
+                :link-fn (rn/make-sync-link-fn ~f)))
 
 
 (defn network
@@ -135,7 +135,7 @@
         e4 (eventstream "e4")
         numbers (seqstream (range))
         n (network (rn/make-link "items" [e1] [e2]
-                                :eval-fn
+                                :link-fn
                                 (fn [{:keys [input-rvts output-reactives] :as input}]
                                   (let [vs (:items (rn/fvalue input-rvts))]
                                     {:output-rvts (rn/enqueue-values vs (first output-reactives))})))
@@ -152,7 +152,7 @@
         e3 (eventstream "e3")
         l2 (link identity [e2] [e3])
         l1 (rn/make-link "add-remove" [e1] [e2]
-                        :eval-fn
+                        :link-fn
                         (fn [_]
                           {:add [l2]
                            :remove-by #(= (:outputs %) [e2])}))
@@ -175,7 +175,7 @@
         e2 (eventstream "e2")
         e3 (eventstream "e3")
         n (network (assoc (link identity [e1] [e2])
-                     :complete-fn (fn [r] {:add [(link identity [e2] [e3])]})))
+                     :complete-fn (fn [_ r] {:add [(link identity [e2] [e3])]})))
         n-after (rn/complete-and-propagate! n e1)]
     (is (= 0 (->> n-after :links (filter #(= (:outputs %) [e2])) count)))
     (is (= 1 (->> n-after :links (filter #(= (:outputs %) [e3])) count)))))
@@ -194,14 +194,14 @@
                                       id (str "[" from " <= x < " to "]")
                                       filtered-r (eventstream "filtered")]
                                   [(rn/make-link id [i] [filtered-r]
-                                                :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                                :link-fn (fn [{:keys [input-rvts] :as input}]
                                                            (let [x (rn/fvalue input-rvts)]
                                                              (if (and (<= from x) (< x to))
                                                                (rn/make-result-map input x)
                                                                {}))))
                                    (rn/make-link "merge" [filtered-r] [o])])))
                       (cons (rn/make-link "subscriber" [o] []
-                                         :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                         :link-fn (fn [{:keys [input-rvts] :as input}]
                                                     (swap! results conj (rn/fvalue input-rvts))
                                                     {}))))
         n        (apply network links)
@@ -217,16 +217,18 @@
         e4 (eventstream "e4")
         results (atom [])
         n (network (rn/make-link "e1,e2->e3" [e1 e2] [e3]
-                                :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                :link-fn (fn [{:keys [input-rvts] :as input}]
                                            (let [v (reduce + (rn/values input-rvts))]
                                              (rn/make-result-map input v)) )
                                 :complete-on-remove [e3])
                    (rn/make-link "e3->e4" [e3] [e4]
                                 :complete-on-remove [e4])
                    (link (partial swap! results conj) [e4] []))]
+    (alter-var-root #'reactnet.core/network-by-id (fn [_] (constantly (agent n))))
     (rn/update-and-propagate! n {e1 [1 (rn/now)] e2 [2 (rn/now)]})
     (is (= [3] @results))
     (rn/complete-and-propagate! n e1)
+    (Thread/sleep 300)
     (is (rn/completed? e1))
     (is (not (rn/completed? e2)))
     (is (rn/completed? e3))
@@ -250,7 +252,7 @@
                                        :active r
                                        :add [(rn/make-link "" [r] [e2]
                                                           :complete-fn
-                                                          (fn [r]
+                                                          (fn [_ r]
                                                             (merge (swap! q-atom switch)
                                                                    {:remove-by #(= [r] (:inputs %))})))]}
                                       state)
@@ -258,7 +260,7 @@
                          enqueue (fn [state r]
                                    (switch (update-in state [:queue] conj r)))]
                      (rn/make-link "e1->e2" [e1] [e2]
-                                  :eval-fn (fn [{:keys [input-rvts] :as input}]
+                                  :link-fn (fn [{:keys [input-rvts] :as input}]
                                              (swap! q-atom enqueue (f (rn/fvalue input-rvts))))))
                    (link (partial swap! results conj) [e2] []))
         ranges (range 2 3)

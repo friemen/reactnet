@@ -87,7 +87,7 @@
         :input r
         :add [(make-link "temp" [r] [output]
                          :complete-fn
-                         (fn [r]
+                         (fn [_ r]
                            (merge (swap! q-atom switch-reactive q-atom)
                                   {:remove-by #(= [r] (:inputs %))})))])
       queue-state)))
@@ -171,32 +171,104 @@
 
 
 (defn- derive-new
-  [factory-fn label link-fn inputs]
+  [factory-fn label inputs
+   & {:keys [link-fn complete-fn error-fn]
+      :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
   (let [n-id    (network-id (first inputs))
         n-agent (network-by-id n-id)
         new-r   (factory-fn n-agent label)]
     (add-links! n-agent (make-link label inputs [new-r]
-                                   :eval-fn link-fn
+                                   :link-fn link-fn
+                                   :complete-fn complete-fn
+                                   :error-fn error-fn
                                    :complete-on-remove [new-r]))
     new-r))
 
 
+(defn amb
+  [& reactives]
+  (let [n-agent (-> reactives first network-id network-by-id)
+        new-r   (eventstream n-agent "amb")
+        f       (fn [{:keys [input-reactives input-rvts] :as input}]
+                  (let [r (first input-reactives)]
+                    {:remove-by #(= (:outputs %) [new-r])
+                     :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
+                     :output-rvts (assign-value (fvalue input-rvts) new-r)}))
+        links   (->> reactives (map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
+    (apply (partial add-links! n-agent) links)
+    new-r))
+
+
+(defn rbuffer
+  [no reactive]  
+  (let [b   (atom {:queue []
+                   :dequeued nil})
+        enq (fn [{:keys [queue] :as q} x]
+              (if (>= (count queue) no)
+                (assoc q
+                  :queue [x]
+                  :dequeued queue)
+                (assoc q
+                  :queue (conj queue x)
+                  :dequeued nil)))]
+    (derive-new eventstream "buffer" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts] :as input}]
+                  (if-let [vs (:dequeued (swap! b enq (fvalue input-rvts)))]
+                    (make-result-map input vs)))
+                :complete-fn
+                (fn [link r]
+                  (let [vs (:queue @b)]
+                    (if (seq vs)
+                      {:output-rvts (assign-value vs (-> link :outputs first))}))))))
+
+
+(defn rconcat
+  [& reactives]
+  (let [n-agent (-> reactives first network-id network-by-id)
+        new-r   (eventstream n-agent "concat")
+        state   (atom (make-reactive-queue new-r reactives))
+        link    (-> (swap! state switch-reactive state) :add first)]
+    (add-links! n-agent link)
+    new-r))
+
+
+(defn rdelay
+  [millis reactive]
+  (let [n-agent (-> reactive network-id network-by-id)]
+    (derive-new eventstream "delay" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts output-reactives] :as input}]
+                  (let [output (first output-reactives)
+                        v      (fvalue input-rvts)]
+                    (sched/once scheduler millis #(push! output v))
+                    nil)))))
+
+
+(defn rfilter
+  [pred reactive]
+  (let [[make-link-fn f] (unpack-fn pred)]
+    (derive-new eventstream "filter" [reactive]
+                :link-fn
+                (make-link-fn f (fn [{:keys [input-rvts] :as input} v ex]
+                                  (if v
+                                    (make-result-map input
+                                                     (fvalue input-rvts)
+                                                     ex)))))))
+
+
 (defn rhold
   [reactive]
-  (derive-new behavior
-              "hold"
-              (make-sync-link-fn identity make-result-map)
-              [reactive]))
+  (derive-new behavior "hold" [reactive]))
 
 
 (defn rmap
   [f & reactives]
   (let [[make-link-fn f] (unpack-fn f)]
-    (derive-new eventstream
-                "map"
-                (make-link-fn f make-result-map)
-                reactives)))
+    (derive-new eventstream "map" reactives
+                :link-fn
+                (make-link-fn f make-result-map))))
 
 
 
@@ -207,9 +279,10 @@
         new-r    (eventstream n-agent "mapcat'")
         state    (atom (make-reactive-queue new-r)) ]
     (add-links! n-agent (make-link "mapcat'" [reactive] []
-                                   :eval-fn (fn [{:keys [input-rvts] :as input}]
-                                              (let [r (f (fvalue input-rvts))]
-                                                (swap! state enqueue-reactive state r)))
+                                   :link-fn
+                                   (fn [{:keys [input-rvts] :as input}]
+                                     (let [r (f (fvalue input-rvts))]
+                                       (swap! state enqueue-reactive state r)))
                                    :complete-on-remove [new-r]))
     new-r))
 
@@ -217,26 +290,13 @@
 (defn rmapcat
   [f & reactives]
   (let [[make-link-fn f] (unpack-fn f)]
-    (derive-new eventstream
-                "mapcat"
+    (derive-new eventstream "mapcat" reactives
+                :link-fn
                 (make-link-fn f (fn [input vs ex]
                                   (assoc input
                                     :output-rvts (if-not ex
                                                    (enqueue-values vs (-> input :output-reactives first)))
-                                    :exception ex)))
-                reactives)))
-
-
-(defn rreduce
-  [f initial-value & reactives]
-  (let [[make-link-fn f] (unpack-fn f)
-        accu             (atom initial-value)]
-    (derive-new behavior
-                "reduce"
-                (make-link-fn (fn [& vs]
-                                (swap! accu #(apply (partial f %) vs)))
-                              make-result-map)
-                reactives)))
+                                    :exception ex))))))
 
 
 (defn rmerge
@@ -248,41 +308,28 @@
     new-r))
 
 
-(defn rfilter
-  [pred reactive]
-  (let [[make-link-fn f] (unpack-fn pred)]
-    (derive-new eventstream
-                "filter"
-                (make-link-fn f (fn [{:keys [input-rvts] :as input} v ex]
-                                  (if v
-                                    (make-result-map input
-                                                     (fvalue input-rvts)
-                                                     ex))))
-                [reactive])))
+(defn rreduce
+  [f initial-value & reactives]
+  (let [[make-link-fn f] (unpack-fn f)
+        accu             (atom initial-value)]
+    (derive-new behavior "reduce" reactives
+                :link-fn
+                (make-link-fn (fn [& vs]
+                                (swap! accu #(apply (partial f %) vs)))
+                              make-result-map))))
 
 
 (defn rtake
   [no reactive]
   (let [c (atom no)]
-    (derive-new eventstream
-              "take"
-              (fn [{:keys [input-rvts] :as input}]
-                (let [v (fvalue input-rvts)]
-                  (if (> @c 0)
-                    (do (swap! c dec)
-                        (make-result-map input v))
-                    {})))
-              [reactive])))
-
-
-(defn rconcat
-  [& reactives]
-  (let [n-agent (-> reactives first network-id network-by-id)
-        new-r   (eventstream n-agent "concat")
-        state   (atom (make-reactive-queue new-r reactives))
-        link    (-> (swap! state switch-reactive state) :add first)]
-    (add-links! n-agent link)
-    new-r))
+    (derive-new eventstream "take" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts] :as input}]
+                  (let [v (fvalue input-rvts)]
+                    (if (> @c 0)
+                      (do (swap! c dec)
+                          (make-result-map input v))
+                      {}))))))
 
 
 (defn rstartwith
@@ -296,27 +343,13 @@
         new-r   (eventstream n-agent "switch")]
     (add-links! n-agent
                 (make-link "switcher" [reactive] []
-                           :eval-fn
+                           :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
                                {:remove-by #(= (:outputs %) [new-r])
                                 :add (if (satisfies? IReactive r)
                                        [(make-link "switch" [r] [new-r])])}))))
     new-r))
-
-
-(defn rbuffer
-  [no reactive]
-  (let [l (java.util.LinkedList.)]
-    (derive-new eventstream
-                "buffer"
-                (fn [{:keys [input-rvts] :as input}]
-                  (let [v (fvalue input-rvts)]
-                    (when (>= (.size l) no)
-                      (.removeLast l))
-                    (.addFirst l v)
-                    (make-result-map input (vec l))))
-                [reactive])))
 
 
 (defn subscribe
@@ -326,7 +359,7 @@
         n-id (network-id reactive)
         n-agent (network-by-id n-id)]
     (add-links! n-agent (make-link "subscriber" [reactive] []
-                                   :eval-fn (make-link-fn f (constantly {}))))
+                                   :link-fn (make-link-fn f (constantly {}))))
     reactive))
 
 
@@ -335,30 +368,17 @@
   (subscribe (partial swap! a conj) reactive))
 
 
-(defn rdelay
-  [millis reactive]
-  (let [n-agent (-> reactive network-id network-by-id)]
-    (derive-new eventstream
-                "delay"
-                (fn [{:keys [input-rvts output-reactives] :as input}]
-                  (let [output (first output-reactives)
-                        v      (fvalue input-rvts)]
-                    (sched/once scheduler millis #(push! output v))
-                    nil))
-                [reactive])))
-
-
 (defn rthrottle
   [f millis max-queue-size reactive]
   (let [n-agent (-> reactive network-id network-by-id)
         queue-atom (atom (make-queue max-queue-size))
-        new-r (derive-new eventstream
-                          "throttle"
+        new-r (derive-new eventstream "throttle" [reactive]
+                          :link-fn
                           (fn [{:keys [input-rvts] :as input}]
                             (let [v (fvalue input-rvts)]
+                              ;; TODO enqueue silently drops items, fix this
                               (swap! queue-atom enqueue v)
-                              nil))
-                          [reactive])]
+                              nil)))]
     (sched/interval scheduler millis millis
                     #(let [vs (:dequeued (swap! queue-atom dequeue-all))]
                        (when-not (empty? vs) (push! new-r (f vs)))))

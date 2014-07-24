@@ -60,12 +60,13 @@
                             :last-occ (first queue)
                             :queue (pop queue))))))
   (deliver! [this value-timestamp]
-    (let [will-complete (= (first value-timestamp) ::reactnet.core/completed)]
+    (let [will-complete (= (first value-timestamp) :reactnet.core/completed)]
       (seq (:queue (swap! a (fn [{:keys [completed queue] :as a}]
                               (if completed
                                 a
                                 (if will-complete
-                                  (assoc a :completed true)
+                                  (do (rn/dump "WILL COMPLETE" (:label this))
+                                      (assoc a :completed true))
                                   (if (<= n (count queue))
                                     (throw (IllegalStateException. (str "Cannot add more than " n " items to stream '" label "'")))
                                     (do (rn/dump "DELIVER!" (:label this) "<-" (first value-timestamp))
