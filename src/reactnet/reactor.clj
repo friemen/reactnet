@@ -245,16 +245,40 @@
     new-r))
 
 
-(defn rdelay
+(defn rcount
+  [reactive]
+  (let [c (atom 0)]
+    (derive-new eventstream "count" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts] :as input}]
+                  (make-result-map input (swap! c inc))))))
+
+
+(defn debounce
   [millis reactive]
-  (let [n-agent (-> reactive network-id network-by-id)]
-    (derive-new eventstream "delay" [reactive]
+  (let [task (atom nil)]
+    (derive-new eventstream "debounce" [reactive]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
-                        v      (fvalue input-rvts)]
-                    (sched/once scheduler millis #(push! output v))
-                    nil)))))
+                        v      (fvalue input-rvts)
+                        old-t  @task
+                        new-t  (sched/once scheduler millis #(push! output v))]
+                    (when (and old-t (sched/pending? old-t))
+                      (sched/cancel old-t))
+                    (reset! task new-t)
+                  nil)))))
+
+
+(defn rdelay
+  [millis reactive]
+  (derive-new eventstream "delay" [reactive]
+              :link-fn
+              (fn [{:keys [input-rvts output-reactives] :as input}]
+                (let [output (first output-reactives)
+                      v      (fvalue input-rvts)]
+                  (sched/once scheduler millis #(push! output v))
+                  nil))))
 
 
 (defn rfilter

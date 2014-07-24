@@ -110,6 +110,30 @@
     (is (= [:foo :bar :baz "FOO" "BAR" 1 2 3] @r))))
 
 
+(deftest count-test
+  (let [r   (atom [])
+        e1  (r/eventstream n "e1")
+        c   (->> e1 r/rcount (r/swap-conj! r))]
+    (push-and-wait! e1 :foo e1 :bar e1 :baz)
+    (is (= [1 2 3] @r))
+    (complete! e1)
+    (wait)
+    (is (rn/completed? c))))
+
+
+(deftest debounce-test
+  (let [r   (atom [])
+        e1  (r/eventstream n "e1")
+        c   (->> e1 (r/debounce 250) (r/swap-conj! r))]
+    (push-and-wait! e1 :foo e1 :bar e1 :baz)
+    (is (= [] @r))
+    (wait 100)
+    (is (= [:baz] @r))
+    (rn/push! e1 :foo)
+    (wait 300)
+    (is (= [:baz :foo] @r))))
+
+
 (deftest delay-test
   (let [r   (atom [])
         e1  (r/eventstream n "e1")
