@@ -195,14 +195,16 @@
                                                              (if (and (<= from x) (< x to))
                                                                (rn/make-result-map input x)
                                                                {}))))
-                                   (rn/make-link "merge" [filtered-r] [o])])))
+                                   (rn/make-link (str "merge" id) [filtered-r] [o])])))
                       (cons (rn/make-link "subscriber" [o] []
                                          :link-fn (fn [{:keys [input-rvts] :as input}]
                                                     (swap! results conj (rn/fvalue input-rvts))
                                                     {}))))
         values   (repeatedly 1000 #(rand-int (* distance c)))]
     (with-network links
-      (apply push! (cons i values)))
+      (is (= 51 (-> rn/*engine* rn/network :links count)))
+      (apply push! (cons i values))
+      (is (= 51 (-> rn/*engine* rn/network :links count))))
     (is (= values @results))))
 
 
