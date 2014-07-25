@@ -175,7 +175,7 @@
 
 (defn link-inputs
   [link]
-  (-> link :inputs wref-unwrap))
+  (-> link :inputs))
 
 
 
@@ -217,7 +217,7 @@
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
   {:label label
-   :inputs (wref-wrap inputs)
+   :inputs inputs
    :outputs (wref-wrap outputs)
    :link-fn link-fn
    :error-fn error-fn
@@ -304,13 +304,11 @@
   
   (let [m (->> links
                (mapcat (fn [l] (concat (link-inputs l) (link-outputs l))))
-               (map #(vector %2 %1) (range))
-               (into {}))
+               (map #(vector %2 %1) (range)))
         wm (WeakHashMap.)]
-    #_ (doseq [[r rid] m]  ;; if WeakHashMap is used then links will be dropped too early
+    (doseq [[r rid] m]
       (.put wm r rid))
-    #_ wm
-    m))
+    wm))
 
 
 (defn ^:no-doc rid-links-map
