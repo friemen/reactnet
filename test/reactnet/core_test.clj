@@ -151,7 +151,7 @@
                            :link-fn
                            (fn [_]
                              {:add [l2]
-                              :remove-by #(= (:outputs %) [e2])}))]
+                              :remove-by #(= (rn/link-outputs %) [e2])}))]
     (with-network [l1]
       (push! e1 :foo)
       (is (= 1 (-> rn/*engine* rn/network :links count)))
@@ -173,8 +173,8 @@
     (with-network [(assoc (link identity [e1] [e2])
                      :complete-fn (fn [_ r] {:add [(link identity [e2] [e3])]}))]
       (push! e1 ::rn/completed)
-      (is (= 0 (->> rn/*engine* rn/network :links (filter #(= (:outputs %) [e2])) count)))
-      (is (= 1 (->> rn/*engine* rn/network :links (filter #(= (:outputs %) [e3])) count))))))
+      (is (= 0 (->> rn/*engine* rn/network :links (filter #(= (rn/link-outputs %) [e2])) count)))
+      (is (= 1 (->> rn/*engine* rn/network :links (filter #(= (rn/link-outputs %) [e3])) count))))))
 
 
 (deftest large-mult-filter-merge-test
@@ -255,7 +255,7 @@
                                                            :complete-fn
                                                            (fn [_ r]
                                                              (merge (swap! q-atom switch)
-                                                                    {:remove-by #(= [r] (:inputs %))})))]}
+                                                                    {:remove-by #(= [r] (rn/link-inputs %))})))]}
                                       state)
                                     state))
                          enqueue (fn [state r]

@@ -1,5 +1,6 @@
 (ns reactnet.core
-  (:require [clojure.string :as s]))
+  (:require [clojure.string :as s])
+  (:import [java.lang.ref WeakReference]))
 
 ;; TODOs
 ;; - Preserve somehow the timestamp when applying a link function:
@@ -9,7 +10,6 @@
 ;; - Graphviz visualization of the network
 ;; - Support core.async
 ;; - Support interceptor?
-
 
 ;; Ideas about error handling
 ;; - An exception is thrown by custom functions invoked from a link
@@ -157,6 +157,25 @@
     (for [v vs] [r [v t]])))
 
 
+(defn- wref-wrap
+  [xs]
+  (mapv #(WeakReference. %) xs))
+
+(defn- wref-unwrap
+  [wrefs]
+  (mapv #(.get %) wrefs))
+
+
+(defn link-outputs
+  [link]
+  (-> link :outputs wref-unwrap))
+
+
+(defn link-inputs
+  [link]
+  (-> link :inputs wref-unwrap))
+
+
 
 ;; ---------------------------------------------------------------------------
 ;; Factories
@@ -196,8 +215,8 @@
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
   {:label label
-   :inputs inputs
-   :outputs outputs
+   :inputs (wref-wrap inputs)
+   :outputs (wref-wrap outputs)
    :link-fn link-fn
    :error-fn error-fn
    :complete-fn complete-fn
@@ -226,11 +245,11 @@
 (defn ^:no-doc str-link  
   [l]
   (str "  L" (:level l)
-       " [" (s/join " " (map :label (:inputs l)))
+       " [" (s/join " " (map :label (link-inputs l)))
        "] -- " (:label l) " --> ["
-       (s/join " " (mapv :label (:outputs l)))
+       (s/join " " (mapv :label (link-outputs l)))
        "] " (cond
-             (every? available? (:inputs l)) "READY"
+             (every? available? (->> l link-inputs (remove nil?))) "READY"
              (dead? l) "DEAD"
              :else "incomplete")))
 
@@ -281,7 +300,7 @@
   links."
   [links]
   (->> links
-       (mapcat (fn [l] (concat (:inputs l) (:outputs l))))
+       (mapcat (fn [l] (concat (link-inputs l) (link-outputs l))))
        set))
 
 
@@ -290,8 +309,8 @@
   an input of the links it points to."
   [links]
   (->> links
-       (mapcat (fn [{:keys [inputs] :as l}]
-                 (for [r inputs] [r l])))
+       (mapcat (fn [l]
+                 (for [r (link-inputs l)] [r l])))
        (reduce (fn [m [r l]]
                  (update-in m [r] conj l))
                {})))
@@ -303,7 +322,7 @@
   (->> links
        reactive-links-map
        (map (fn [[r links]]
-              [r (->> links (mapcat :outputs) set)]))
+              [r (->> links (mapcat link-outputs) set)]))
        (into {})))
 
 
@@ -327,8 +346,9 @@
                                      root)
         level-map-incl-links (->> links
                                   (map (fn [l]
-                                         {:pre [(-> l :inputs seq)]}
-                                         [l (->> (:inputs l)
+                                         {:pre [(->> l link-inputs (remove nil?) seq)]}
+                                         [l (->> l link-inputs
+                                                 (remove nil?)
                                                  (map level-map-wo-root)
                                                  (reduce max)
                                                  inc)]))
@@ -341,19 +361,24 @@
   "Returns true for a link if
   - all inputs are available,
   - at least one output is not completed."
-  [{:keys [inputs outputs]}]
-  (and (every? available? inputs)
-       (remove completed? outputs)))
+  [link]
+  (let [inputs (link-inputs link)
+        outputs (link-outputs link)]
+    (and (every? available? inputs)
+         (remove completed? outputs))))
 
 
 (defn ^:no-doc dead?
   "Returns true for a link if has not inputs, or at least one of it's
   inputs is completed, or all outputs are completed. Empty outputs does
   not count as 'all outputs completed'."
-  [{:keys [inputs outputs]}]
-  (or (empty? inputs)
-      (some completed? inputs)
-      (and (seq outputs) (every? completed? outputs))))
+  [link]
+  (let [inputs (link-inputs link)
+        outputs (link-outputs link)]
+    (or (empty? inputs)
+        (some nil? inputs)
+        (some completed? inputs)
+        (and (seq outputs) (every? completed? outputs)))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -448,11 +473,12 @@
 (defn- eval-link!
   "Evaluates one link, returning Result map, or nil if the link function
   returned nil."
-  [rvt-map {:keys [link-fn inputs outputs level] :as link}]
-  (let [input        {:link link
-                      :input-reactives inputs
+  [rvt-map {:keys [link-fn level] :as link}]
+  (let [inputs       (link-inputs link)
+        input        {:link link
+                      :input-reactives inputs 
                       :input-rvts (for [r inputs] [r (rvt-map r)])
-                      :output-reactives outputs
+                      :output-reactives (->> link link-outputs (remove nil?))
                       :output-rvts nil}
         result        (try (link-fn input)
                            (catch Exception ex {:exception ex}))
@@ -466,7 +492,7 @@
   link and reactive and returns the results."
   [{:keys [reactives links links-map] :as n}]
   (let [results  (for [r (->> links
-                              (mapcat :inputs)
+                              (mapcat link-inputs)
                               set
                               (filter completed?))
                        [l f] (->> r links-map
@@ -527,7 +553,7 @@
                                 (remove same-level?))
            
            rvt-map         (->> current-links
-                                (mapcat :inputs)
+                                (mapcat link-inputs)
                                 distinct
                                 consume-values!)
            _               (dump-values "INPUTS" rvt-map)

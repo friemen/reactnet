@@ -96,7 +96,7 @@
                          :complete-fn
                          (fn [_ r]
                            (c/merge (swap! q-atom switch-reactive q-atom)
-                                    {:remove-by #(= [r] (:inputs %))})))])
+                                    {:remove-by #(= [r] (link-inputs %))})))])
       queue-state)))
 
 
@@ -214,7 +214,7 @@
   (let [new-r   (eventstream "amb")
         f       (fn [{:keys [input-reactives input-rvts] :as input}]
                   (let [r (first input-reactives)]
-                    {:remove-by #(= (:outputs %) [new-r])
+                    {:remove-by #(= (link-outputs %) [new-r])
                      :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
                      :output-rvts (assign-value (fvalue input-rvts) new-r)}))
         links   (->> reactives (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
@@ -238,7 +238,7 @@
                 (fn [link r]
                   (let [vs (:queue @b)]
                     (if (seq vs)
-                      {:output-rvts (assign-value vs (-> link :outputs first))}))))))
+                      {:output-rvts (assign-value vs (-> link link-outputs first))}))))))
 
 
 (defn concat
@@ -371,7 +371,7 @@
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
-                               {:remove-by #(= (:outputs %) [new-r])
+                               {:remove-by #(= (link-outputs %) [new-r])
                                 :add (if (satisfies? IReactive r)
                                        [(make-link "switch" [r] [new-r])])}))))
     new-r))
@@ -402,7 +402,7 @@
                              (let [r (make-result-map input (fvalue input-rvts))]
                                (if (>= 0 (swap! c dec))
                                  (assoc r
-                                   :remove-by #(= (:outputs %) [new-r]))
+                                   :remove-by #(= (link-outputs %) [new-r]))
                                  r)))
                            :complete-on-remove [new-r]))
     new-r))
