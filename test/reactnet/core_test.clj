@@ -58,7 +58,7 @@
       (push! x 2 y 3)
       (are [rs vs] (= (mapv deref rs) vs)
            [x y z] [2 3 5])
-      (is (= 3 (-> rn/*engine* rn/network :reactives count))))))
+      (is (= 3 (-> rn/*engine* rn/network :rid-map count))))))
 
 
 (deftest x*<x+2>-test

@@ -4,7 +4,6 @@
            [java.util WeakHashMap]))
 
 ;; TODOs
-;; - Think about a SAFE way to get rid of unused reactives
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Create unit test for cyclic deps
@@ -45,7 +44,7 @@
   propagation of the value should be triggered."))
 
 ;; Engine:
-;; Serves as abstraction of how the network is kept and
+;; Serves as abstraction of how the network is stored and
 ;; propagation/updates to it are scheduled.
 
 (defprotocol IEngine
@@ -96,7 +95,8 @@
 ;; A map containing
 ;;   :id                  A string containing the fqn of the agent var
 ;;   :links               Collection of links
-;;   :reactives           Map reactives to reactive ids a.k.a rid (derived)
+;;   :rid-map             WeakHashMap {Reactive -> rid}
+;;                        rid = reactive id (derived)
 ;;   :level-map           Map {rid -> topological-level} (derived)
 ;;   :links-map           Map {rid -> Seq of links} (derived)
 
@@ -159,21 +159,29 @@
     (for [v vs] [r [v t]])))
 
 
+
+;; ---------------------------------------------------------------------------
+;; Functions on links
+
 (defn- wref-wrap
+  "Wraps all xs in a WeakReference and returns a vector of those."
   [xs]
   (mapv #(WeakReference. %) xs))
 
 (defn- wref-unwrap
+  "Unwraps all WeakReferences and returns the result as vector."
   [wrefs]
   (mapv #(.get %) wrefs))
 
 
 (defn link-outputs
+  "Returns the output-reactives of a link."
   [link]
   (-> link :outputs wref-unwrap))
 
 
 (defn link-inputs
+  "Returns the input-reactives of a link."
   [link]
   (-> link :inputs))
 
@@ -297,7 +305,7 @@
 ;; ---------------------------------------------------------------------------
 ;; Getting information about the reactive graph
 
-(defn ^:no-doc reactives-map
+(defn ^:no-doc reactive-rid-map
   "Returns a WeakHashMap {Reactive -> rid} of all reactives that occur
   as inputs or outputs in links. rid is an integer value."
   [links]
@@ -314,34 +322,35 @@
 (defn ^:no-doc rid-links-map
   "Returns a map {rid -> (Seq of links)}, where the reactive is
   an input of the links it points to."
-  [reactives-map links]
+  [rid-map links]
   (->> links
        (mapcat (fn [l]
-                 (for [r (link-inputs l)] [(get reactives-map r) l])))
+                 (for [r (link-inputs l)] [(get rid-map r) l])))
        (reduce (fn [m [rid l]]
                  (update-in m [rid] conj l))
                {})))
 
 
-(defn ^:no-doc reactive-followers-map
+(defn ^:no-doc rid-followers-map
   "Returns a map {rid -> (Set of following reactive ids)}."
-  [reactives-map links]
+  [rid-map links]
   (->> links
-       (rid-links-map reactives-map)
+       (rid-links-map rid-map)
        (map (fn [[rid links]]
               [rid (->> links
                         (mapcat link-outputs)
-                        (map (partial get reactives-map))
+                        (map (partial get rid-map))
                         set)]))
        (into {})))
 
 
 (defn ^:no-doc rid-level-map
-  "Returns a map {Reactive/Link -> level} containing all reactives and
+  "Returns a map {rid/Link -> level} containing all reactive rids and
   links in the network, where level is an integer representing
-  topological order, i.e. L(r1) < L(r2) => r1 is to be touched before r2."
-  [reactives-map links]
-  (let [rfm                  (reactive-followers-map reactives-map links)
+  topological order, i.e. L(r1) < L(r2) => r1 is to be touched before
+  r2."
+  [rid-map links]
+  (let [rfm                  (rid-followers-map rid-map links)
         rfm-with-root        (assoc rfm -1 (set (keys rfm)))
         levels               (fn levels [visited level rid]
                                (if-not (visited rid)
@@ -357,7 +366,7 @@
                                   (map (fn [l]
                                          [l (->> l link-inputs
                                                  (remove nil?)
-                                                 (map (partial get reactives-map))
+                                                 (map (partial get rid-map))
                                                  (map level-map-wo-root)
                                                  (reduce max)
                                                  inc)]))
@@ -396,17 +405,17 @@
 
 
 (defn- rebuild
-  "Takes a network and a set of links and re-calculates reactives,
+  "Takes a network and a set of links and re-calculates rid-map,
   links-map and level-map. Preserves other existing entries. Returns a
   new network."
   [{:keys [id] :as n} links]
-  (let [rs-map        (reactives-map links)
-        level-map     (rid-level-map rs-map links)
+  (let [rid-map       (reactive-rid-map links)
+        level-map     (rid-level-map rid-map links)
         leveled-links (mapv #(assoc % :level (level-map %)) links)]
     (assoc n
-      :reactives rs-map
+      :rid-map rid-map
       :links leveled-links
-      :links-map (rid-links-map rs-map leveled-links)
+      :links-map (rid-links-map rid-map leveled-links)
       :level-map level-map)))
 
 
@@ -501,13 +510,13 @@
 (defn- eval-complete-fns!
   "Detects all completed input reactives, calls complete-fn for each
   link and reactive and returns the results."
-  [{:keys [reactives links links-map] :as n}]
+  [{:keys [rid-map links links-map] :as n}]
   (let [results  (for [r (->> links
                               (mapcat link-inputs)
                               (remove nil?)
                               set
                               (filter completed?))
-                       [l f] (->> r (get reactives) links-map
+                       [l f] (->> r (get rid-map) links-map
                                  (map (juxt identity :complete-fn))) :when f]
                    (f l r))]
     (remove nil? results)))
@@ -542,13 +551,13 @@
      (propagate! network [] []))
   ([network pending-reactives]
      (propagate! network [] pending-reactives))
-  ([{:keys [reactives links-map level-map] :as network}
+  ([{:keys [rid-map links-map level-map] :as network}
     pending-links pending-reactives]
      (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
      (when (seq pending-reactives)
        (dump "  PENDING:"(->> pending-reactives (map :label) (s/join ", "))))
      (let [links           (->> pending-reactives
-                                (map (partial get reactives))
+                                (map (partial get rid-map))
                                 (mapcat links-map)
                                 (concat pending-links)
                                 (sort-by :level (comparator <))
@@ -581,11 +590,11 @@
            all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
            upstream?       (fn [[r _]]
-                             (let [r-level (level-map (get reactives r))]
+                             (let [r-level (level-map (get rid-map r))]
                                (or (nil? r-level) (< r-level level))))
            downstream-rvts (->> all-rvts
                                 (remove upstream?)
-                                (sort-by #(level-map (get reactives (first %))) (comparator <)))
+                                (sort-by #(level-map (get rid-map (first %))) (comparator <)))
            upstream-rvts   (->> all-rvts (filter upstream?))]
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
@@ -617,8 +626,8 @@
 
 
 (defn pending-reactives
-  [{:keys [reactives]}]
-  (->> reactives keys (filter pending?)))
+  [{:keys [rid-map]}]
+  (->> rid-map keys (filter pending?)))
 
 
 (defn update-and-propagate!
@@ -692,8 +701,8 @@
 (defn pp
   "Pretty print network in agent."
   [engine]
-  (let [{:keys [links reactives values]} (network engine)]
-    (println (str "Reactives\n" (s/join "\n" (->> reactives
+  (let [{:keys [links rid-map]} (network engine)]
+    (println (str "Reactives\n" (s/join "\n" (->> rid-map
                                                   keys
                                                   (map str-react)))
                   "\nLinks\n" (s/join "\n" (map str-link links))))))

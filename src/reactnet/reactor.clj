@@ -13,7 +13,9 @@
 ;; TODOS
 ;; - How to prevent scheduled tasks from accumulating?
 ;; - Implement unsubscribe
-
+;; - Implement proper error handling
+;; - Implement execution-modes (sync, async, future)
+;; - Implement expression lifting
 
 
 ;; ===========================================================================
