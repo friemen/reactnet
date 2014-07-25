@@ -2,12 +2,9 @@
   (:require [clojure.string :as s]))
 
 ;; TODOs
-;; - The agent based network is an obstacle for unit testing
-;; - The link between reactives and the network by var-lookup is ugly
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Create unit test for cyclic deps
-;; - Handle the initial state of the network
 ;; - Add pause! and resume! for the network
 ;; - Graphviz visualization of the network
 ;; - Support core.async
@@ -31,9 +28,6 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
-  (network-id [r]
-    "Returns a string containing the fully qualified name of a network
-  agent var.")
   (last-value [r]
     "Returns latest value of the reactive r.")
   (available? [r]
@@ -48,6 +42,15 @@
     "Sets/adds a pair of value and timestamp to r, returns true if a
   propagation of the value should be triggered."))
 
+;; Engine:
+;; Serves as abstraction of how the network is kept and
+;; propagation/updates to it are scheduled.
+
+(defprotocol IEngine
+  (execute [e f args])
+  (network [e]))
+
+(def ^:dynamic *engine* nil)
 
 ;; Link:
 ;; A map connecting input and output reactives via a function.
@@ -253,9 +256,12 @@
 
 (defn ^:no-doc dump-links
   [label links]
-  (dump "-" label (apply str (repeat (- 57 (count label)) \-)))
-  (dump (->> links (map str-link) (s/join "\n")))
-  (dump (apply str (repeat 60 \-))))
+  (if (seq links)
+    (do
+      (dump "-" label (apply str (repeat (- 57 (count label)) \-)))
+      (dump (->> links (map str-link) (s/join "\n")))
+      (dump (apply str (repeat 60 \-))))
+    (dump "-" label "- No links")))
 
 
 (defn ^:no-doc dump-values
@@ -499,8 +505,9 @@
   ([network pending-reactives]
      (propagate! network [] pending-reactives))
   ([network pending-links pending-reactives]
-     (dump "\n= PROPAGATE" (apply str (repeat 48 "=")))
-     (dump "PENDING:"(->> pending-reactives (map :label) (s/join ", ")))
+     (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
+     (when (seq pending-reactives)
+       (dump "  PENDING:"(->> pending-reactives (map :label) (s/join ", "))))
      (let [links-map       (:links-map network)
            level-map       (:level-map network)
            links           (->> pending-reactives
@@ -594,29 +601,69 @@
   (update-and-propagate! n nil))
 
 
+
+(defn push!
+  "Starts an update of a reactive and a propagation cycle using
+  the engines execute function. Returns the value."
+  ([reactive value]
+     (push! *engine* reactive value))
+  ([engine reactive value]
+     (push! engine reactive value (now)))
+  ([engine reactive value timestamp]
+     (execute engine update-and-propagate! [{reactive [value timestamp]}])
+     value))
+
+
+(defn complete!
+  "Delivers the ::completed value into a reactive and notifies the
+  complete-fn handler of all links that the reactive is an input
+  of. Updates the network according to results of handlers."
+  ([reactive]
+     (complete! *engine* reactive))
+  ([engine reactive]
+     (execute engine complete-and-propagate! [reactive])
+     ::completed))
+
+
+
 ;; ---------------------------------------------------------------------------
-;; Agent related functions
+;; Engine implementations and related functions
 
 
-(defmacro defnetwork
-  "Interns a symbol pointing to an agent with a new, empty network in
-  the current namespace. Use subsequent calls to add-links! in order
-  to add/rebuild the network."
-  [symbol]
-  `(def ~symbol (agent (make-network ~(str *ns* "/" symbol) [])
-                       :error-handler ~(fn [_ ex] (.printStackTrace ex)))))
-
-(defn network-by-id
-  [id]
-  (let [[ns-name sym-name] (s/split id #"/")]
-    (some-> ns-name symbol the-ns ns-publics (get (symbol sym-name)) var-get)))
+(defn add-links!
+  "Adds links to the network using execute on the
+  networks engine. Returns the network engine."
+  [engine & links]
+  (execute engine add-links [links])
+  (execute engine update-and-propagate! [nil]))
 
 
-#_ (def network-by-id
-  "Returns the agent from the fully qualified name of the var holding
-  the agent."
-  (memoize network-by-id'))
+(defn remove-links!
+  "Removes links from the network using execute on the
+  networks engine. Returns the network engine."
+  [engine pred]
+  (execute engine remove-links [pred])
+  (execute engine update-and-propagate! [nil]))
 
+
+(defn pp
+  "Pretty print network in agent."
+  [engine]
+  (let [{:keys [links reactives values]} (network engine)]
+    (println (str "Reactives\n" (s/join "\n" (map str-react reactives))
+                  "\nLinks\n" (s/join "\n" (map str-link links))))))
+
+
+(defmacro with-engine
+  "Binds the given engine to the dynamic var *engine* and executes
+  the expressions within that binding."
+  [engine & exprs]
+  `(binding [reactnet.core/*engine* ~engine]
+     ~@exprs))
+
+
+
+;; put this into it's own ns
 
 (defn- sleep-if-necessary
   "Puts the current thread to sleep if the queue of pending agent
@@ -626,48 +673,36 @@
     (Thread/sleep millis)))
 
 
-(defn push!
-  "Asynchronously starts an update of a reactive and a propagation
-  cycle using network agent's send-off.  Returns the value."
-  ([reactive value]
-     (push! reactive value (now)))
-  ([reactive value timestamp]
-     (let [n-agent (-> reactive network-id network-by-id)]
-       (sleep-if-necessary n-agent 1000 100)
-       (send-off n-agent
-                 update-and-propagate!
-                 {reactive [value timestamp]}))
-     value))
-
-
-(defn complete!
-  "Asynchronously delivers the ::completed value into a reactive and
-  notifies the complete-fn handler of all links that the reactive is an
-  input of. Updates the network according to results of handlers."
-  [reactive]
-  (let [n-agent (-> reactive network-id network-by-id)]
+(defrecord AgentEngine [n-agent]
+  IEngine
+  (execute [this f args]
     (sleep-if-necessary n-agent 1000 100)
-    (send-off n-agent
-              complete-and-propagate!
-              reactive))
-  ::completed)
+    (send-off n-agent (fn [n]
+                        (binding [*engine* this]
+                          (apply (partial f n) args)))))
+  (network [this]
+    @n-agent))
 
 
-(defn add-links!
-  "Asynchronously adds links to the network using send-off on the
-  networks agent. Returns the network agent."
-  [n-agent & links]
-  (send-off n-agent add-links links))
+(defn agent-engine
+  [network]
+  (AgentEngine. (agent network
+                       :error-handler (fn [_ ex] (.printStackTrace ex)))))
 
 
-(defn pp
-  "Pretty print network in agent."
-  [n-agent]
-  {:pre [(instance? clojure.lang.IRef n-agent)]}
-  (let [{:keys [links reactives values]} @n-agent]
-    (println (str "Reactives\n" (s/join "\n" (map str-react reactives))
-                  "\nLinks\n" (s/join "\n" (map str-link links))))))
+(defrecord AtomEngine [n-atom]
+  IEngine
+  (execute [this f args]
+    (binding [*engine* this]
+      (swap! n-atom (fn [n]
+                      (apply (partial f n) args)))))
+  (network [this]
+    @n-atom))
 
+
+(defn atom-engine
+  [network]
+  (AtomEngine. (atom network)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -697,12 +732,11 @@
 (defn make-async-link-fn
   [f result-fn]
   (fn [{:keys [input-reactives input-rvts] :as input}]
-    (future (let [n-agent     (-> input-reactives first network-id network-by-id)
-                  [v ex]      (safely-apply f (values input-rvts))
+    (future (let [[v ex]      (safely-apply f (values input-rvts))
                   result-map  (result-fn input v ex)]
               ;; send changes / values to network agent
               (when (or (seq (:add result-map)) (:remove-by result-map))
-                (send-off n-agent update-from-results! [result-map]))
+                (execute *engine* update-from-results! [[result-map]]))
               (doseq [[r [v t]] (:output-rvts result-map)]
                 (push! r v))))
     nil))
@@ -715,7 +749,5 @@
      (fn [{:keys [input-rvts] :as input}]
        (let [[v ex] (safely-apply f (values input-rvts))]
          (result-fn input v ex)))))
-
-
 
 :ok

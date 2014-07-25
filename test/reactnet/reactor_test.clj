@@ -1,17 +1,16 @@
 (ns reactnet.reactor-test
   (:require [clojure.test :refer :all]
             [reactnet.reactor :as r]
-            [reactnet.core :as rn :refer [defnetwork push! complete! pp]]))
+            [reactnet.core :as rn :refer [push! complete! pp]]))
 
-(defnetwork n)
 
 ;; ---------------------------------------------------------------------------
 ;; Support functions
 
 (defn with-clean-network
   [f]
-  (send-off n (fn [n] (rn/make-network (:id n) [])))
-  (f)
+  (rn/with-engine (rn/agent-engine (rn/make-network "unittests" []))
+    (f))
   (r/halt!))
 
 (use-fixtures :each with-clean-network)
@@ -35,20 +34,20 @@
 (deftest sample-test
   (testing "Sample constant value"
     (let [r   (atom [])
-          s   (->> :foo (r/sample n 100) (r/swap-conj! r))]
+          s   (->> :foo (r/sample 100) (r/swap-conj! r))]
       (wait 500)
       (is (<= 4 (count @r)))
       (is (= [:foo :foo :foo :foo] (take 4 @r)))))
   (testing "Sample by invoking a function"
     (let [r   (atom [])
-          s   (->> #(count @r) (r/sample n 100) (r/swap-conj! r))]
+          s   (->> #(count @r) (r/sample 100) (r/swap-conj! r))]
       (wait 500)
       (is (<= 4 (count @r)))
       (is (= [0 1 2 3] (take 4 @r)))))
   (testing "Sample from a ref"
     (let [r   (atom [])
           a   (atom 0)
-          s   (->> a (r/sample n 100) (r/swap-conj! r))]
+          s   (->> a (r/sample 100) (r/swap-conj! r))]
       (wait 150)
       (reset! a 1)
       (wait 400)
@@ -58,16 +57,16 @@
 
 (deftest timer-test
   (let [r   (atom [])
-        t   (->> (r/timer n 200) (r/swap-conj! r))]
+        t   (->> (r/timer 200) (r/swap-conj! r))]
     (wait 1000)
     (is (= [1 2 3 4] (take 4 @r)))))
 
 
 (deftest just-test
   (let [r  (atom [])
-        j  (->> (r/just n 42) (r/swap-conj! r))]
+        j  (r/just 42)]
     (is (rn/pending? j))
-    (send-off n rn/update-and-propagate! nil)
+    (r/swap-conj! r j)
     (wait)
     (is (= [42] @r))
     (is (rn/completed? j))))
@@ -78,8 +77,8 @@
 
 (deftest amb-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
-        e2  (r/eventstream n "e2")
+        e1  (r/eventstream "e1")
+        e2  (r/eventstream "e2")
         c   (->> (r/amb e1 e2) (r/swap-conj! r))]
     (push-and-wait! e2 :foo e1 :bar e2 :baz)
     (is (= [:foo :baz] @r))
@@ -90,7 +89,7 @@
 
 (deftest buffer-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/buffer 2) (r/swap-conj! r))]
     (apply push-and-wait! (interleave (repeat e1) [1 2 3 4 5 6 7]))
     (is (= [[1 2] [3 4] [5 6]] @r))
@@ -101,9 +100,9 @@
 
 (deftest concat-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
-        e2  (r/eventstream n "e2")
-        s   (r/seqstream n [:foo :bar :baz])
+        e1  (r/eventstream "e1")
+        e2  (r/eventstream "e2")
+        s   (r/seqstream [:foo :bar :baz])
         c   (->> e1 (r/concat s e1 e2) (r/swap-conj! r))]
     (push-and-wait! e2 1 e2 2 e2 3
                 e1 "FOO" e1 "BAR" e1 ::rn/completed)
@@ -112,7 +111,7 @@
 
 (deftest count-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 r/count (r/swap-conj! r))]
     (push-and-wait! e1 :foo e1 :bar e1 :baz)
     (is (= [1 2 3] @r))
@@ -123,7 +122,7 @@
 
 (deftest debounce-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/debounce 250) (r/swap-conj! r))]
     (push-and-wait! e1 :foo e1 :bar e1 :baz)
     (is (= [] @r))
@@ -136,7 +135,7 @@
 
 (deftest delay-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/delay 500) (r/swap-conj! r))]
     (push-and-wait! e1 :foo)
     (is (= [] @r))
@@ -148,7 +147,7 @@
   (let [r        (atom [])
         values   (range 10)
         expected (filter odd? values)
-        e1       (r/eventstream n "e1")
+        e1       (r/eventstream "e1")
         c        (->> e1 (r/filter odd?) (r/swap-conj! r))]
     (apply push-and-wait! (interleave (repeat e1) values))
     (is (= [1 3 5 7 9] @r))))
@@ -157,22 +156,22 @@
 (deftest map-test
   (testing "Two eventstreams"
     (let [r   (atom [])
-          e1  (r/eventstream n "e1")
-          e2  (r/eventstream n "e2")
+          e1  (r/eventstream "e1")
+          e2  (r/eventstream "e2")
           c   (->> (r/map + e1 e2) (r/swap-conj! r))]
       (push-and-wait! e1 1 e1 2 e2 1 e2 2)
       (is (= [2 4] @r))))
   (testing "Two behaviors"
     (let [r   (atom [])
-          b1  (r/behavior n "b1" 0)
-          b2  (r/behavior n "b2" 0)
+          b1  (r/behavior "b1" 0)
+          b2  (r/behavior "b2" 0)
           c   (->> (r/map + b1 b2) (r/swap-conj! r))]
       (push-and-wait! b1 1 b1 2 b2 1 b2 2)
-      (is (= [1 2 3 4] @r))))
+      (is (= [0 1 2 3 4] @r))))
   (testing "One eventstream, one behavior"
     (let [r   (atom [])
-          e   (r/eventstream n "e")
-          b   (r/behavior n "b" 0)
+          e   (r/eventstream "e")
+          b   (r/behavior "b" 0)
           c   (->> (r/map + e b) (r/swap-conj! r))]
       (push-and-wait! b 1 b 2 e 1 e 2)
       (is (= [3 4] @r)))))
@@ -180,7 +179,7 @@
 
 (deftest mapcat-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/mapcat :items) (r/swap-conj! r))]
     (push-and-wait! e1 {:name "Me" :items ["foo" "bar" "baz"]})
     (is (= ["foo" "bar" "baz"] @r))))
@@ -189,7 +188,7 @@
 (deftest merge-test
   (let [r        (atom [])
         streams  (for [i (range 5)]
-                   (r/eventstream n (str "e" i)))
+                   (r/eventstream (str "e" i)))
         expected (repeatedly 400 #(rand-int 100))
         c        (->> streams (apply r/merge) (r/swap-conj! r))]
     (doseq [x expected]
@@ -200,7 +199,7 @@
 
 (deftest reduce-test
   (let [values (range 1 5)
-        e1     (r/eventstream n "e1")
+        e1     (r/eventstream "e1")
         b      (->> e1 (r/reduce + 0))]
     (is (r/behavior? b))
     (apply push-and-wait! (interleave (repeat e1) values))
@@ -209,9 +208,9 @@
 
 (deftest switch-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
-        e2  (r/eventstream n "e2")
-        sw  (r/eventstream n "streams")
+        e1  (r/eventstream "e1")
+        e2  (r/eventstream "e2")
+        sw  (r/eventstream "streams")
         c   (->> sw r/switch (r/swap-conj! r))]
     (push-and-wait! e1 "A" e1 "B" e2 "C" sw e2 sw e1)
     (is (= ["C" "A" "B"] @r))))
@@ -219,7 +218,7 @@
 
 (deftest take-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/take 2) (r/swap-conj! r))]
     (push-and-wait! e1 :foo e1 :bar e1 :baz)
     (is (= [:foo :bar] @r))
@@ -229,7 +228,7 @@
 
 (deftest throttle-test
   (let [r   (atom [])
-        e1  (r/eventstream n "e1")
+        e1  (r/eventstream "e1")
         c   (->> e1 (r/throttle last 500 10) (r/swap-conj! r))]
     (push-and-wait! e1 :foo e1 :bar e1 :baz)
     (is (= [] @r))

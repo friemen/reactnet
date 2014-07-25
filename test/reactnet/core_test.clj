@@ -8,32 +8,23 @@
 
 (defn seqstream
   [xs]
-  (SeqStream. "" (atom {:seq (seq xs)}) true))
+  (SeqStream. (atom {:seq (seq xs)}) true))
 
 
 (defn behavior
   [label value]
-  (Behavior. ""
-             label
+  (Behavior. label
              (atom [value (rn/now)])
              (atom true)))
 
 
 (defn eventstream
   [label]
-  (Eventstream. ""
-                label
+  (Eventstream. label
                 (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
                 1000))
-
-(defmacro with-network
-  [n & exprs]
-  `(let [nbi-fn# (var-get #'reactnet.core/network-by-id)]
-     (alter-var-root #'reactnet.core/network-by-id (fn [~'v] (constantly (agent ~n))))
-     ~@exprs
-     (alter-var-root #'reactnet.core/network-by-id (fn [~'v] nbi-fn#))))
 
 
 (defmacro link
@@ -41,116 +32,114 @@
   `(rn/make-link (str '~f) ~inputs ~outputs
                 :link-fn (rn/make-sync-link-fn ~f)))
 
+(defmacro with-network
+  [links & exprs]
+  `(rn/with-engine (rn/atom-engine (rn/make-network "" ~links))
+     ~@exprs))
 
-(defn network
-  [& links]
-  (rn/make-network "" links))
+(defn push!
+  [& rvs]
+  (let [rv-pairs (->> rvs
+                      (partition-by (partial satisfies? rn/IReactive))
+                      (partition 2)
+                      (map (partial apply concat))
+                      (mapcat (fn [[r & values]]
+                                (for [v values] [r v]))))]
+    (doseq [[r v] rv-pairs]
+      (rn/push! rn/*engine* r v))))
 
-
-(defn rv
-  [r v]
-  {r [v (rn/now)]})
 
 
 (deftest z=x+y-test
   (let [x (behavior "x" 1)
         y (behavior "y" 2)
-        z (behavior "z" 0)
-        n (network (link + [x y] [z]))]
-    (rn/update-and-propagate! n (merge (rv x 2) (rv y 3)))
-    (are [rs vs] (= (mapv deref rs) vs)
-         [x y z] [2 3 5])))
+        z (behavior "z" 0)]
+    (with-network [(link + [x y] [z])]
+      (push! x 2 y 3)
+      (are [rs vs] (= (mapv deref rs) vs)
+           [x y z] [2 3 5])
+      (is (= 3 (-> rn/*engine* rn/network :reactives count))))))
 
 
 (deftest x*<x+2>-test
-  (let [results (atom [])
-        x (behavior "x" 2)
-        x+2 (behavior "x+2" nil)
-        z (behavior "z" 0)
-        n (network (link (partial + 2) [x] [x+2])
+  (let [r    (atom [])
+        x    (behavior "x" 2)
+        x+2  (behavior "x+2" nil)
+        z    (behavior "z" 0)]
+    (with-network [(link (partial + 2) [x] [x+2])
                    (link * [x+2 x] [z])
-                   (link (partial swap! results conj) [z] []))]
-    (->> (range 1 11)
-         (map (partial rv x))
-         (reduce rn/update-and-propagate! n))
-    (is (= @results [3 8 15 24 35 48 63 80 99 120]))))
+                   (link (partial swap! r conj) [z] [])]
+      (apply push! (cons x (range 1 11)))
+      (is (= @r [3 8 15 24 35 48 63 80 99 120])))))
 
 
 (deftest incomplete-inputs-test
-  (let [e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        r  (eventstream "r")
-        sums (atom [])
-        n (network (link + [e1 e2] [r])
-                   (link (partial swap! sums conj) [r] []))]
-    (rn/update-and-propagate! n (rv e1 1))
-    (is (nil? @r))
-    (rn/update-and-propagate! n (rv e2 1))
-    (is (= 2 @r))))
+  (let [e1   (eventstream "e1")
+        e2   (eventstream "e2")
+        r    (eventstream "r")
+        sums (atom [])]
+    (with-network [(link + [e1 e2] [r])
+                   (link (partial swap! sums conj) [r] [])]
+      (push! e1 1)
+      (is (nil? @r))
+      (push! e2 1)
+      (is (= 2 @r)))))
 
 
 (deftest queuing-test
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
-        e3 (eventstream "e3")
-        n (network (link identity [e1] [e2])
-                   (link identity [e2] [e3]))]
-    (->> [[e1 :foo] [e1 :bar] [e1 :baz]]
-         (map (partial apply rv))
-         (reduce rn/update-and-propagate! n))
-    (is (= [:foo :bar :baz]
-           (->> e3 :a deref :queue seq (mapv first))))
-    (are [rs vs] (= (mapv deref rs) vs)
-         [e1 e2 e3] [:baz :baz :foo])))
+        e3 (eventstream "e3")]
+    (with-network [(link identity [e1] [e2])
+                   (link identity [e2] [e3])]
+      (push! e1 :foo :bar :baz)
+      (is (= [:foo :bar :baz]
+             (->> e3 :a deref :queue seq (mapv first))))
+      (are [rs vs] (= (mapv deref rs) vs)
+           [e1 e2 e3] [:baz :baz :foo]))))
 
 
 (deftest consume-queued-values-test
-  (let [results (atom [])
-        e1 (eventstream "e1")
-        n (network)]
-    (->> [[e1 :foo] [e1 :bar]]
-         (map (partial apply rv))
-         (reduce rn/update-and-propagate! n))
-    (is (= [] @results))
-    (is (rn/pending? e1))
-    (rn/update-and-propagate!
-     (rn/add-links n [(link (partial swap! results conj) [e1] [])])
-     (rv e1 :baz))
-    (is (= [:foo :bar :baz] @results))
-    (is (not (rn/pending? e1)))))
+  (let [r   (atom [])
+        e1  (eventstream "e1")]
+    (with-network []
+      (push! e1 :foo :bar :baz)
+      (is (= [] @r))
+      (is (rn/pending? e1))
+      (rn/add-links! rn/*engine* (link (partial swap! r conj) [e1] []))
+      (is (= [:foo :bar :baz] @r))
+      (is (not (rn/pending? e1))))))
 
 
 (deftest merge-test
-  (let [results (atom [])
-        e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        m (eventstream "m")
-        n (network (link identity [e1] [m])
+  (let [r   (atom [])
+        e1  (eventstream "e1")
+        e2  (eventstream "e2")
+        m   (eventstream "m")]
+    (with-network [(link identity [e1] [m])
                    (link identity [e2] [m])
-                   (link (partial swap! results conj) [m] []))]
-    (->> [[e1 :foo] [e2 :bar]]
-         (map (partial apply rv))
-         (reduce rn/update-and-propagate! n))
-    (is (= [:foo :bar] @results))))
+                   (link (partial swap! r conj) [m] [])]
+      (push! e1 :foo e2 :bar)
+      (is (= [:foo :bar] @r)))))
 
 
 (deftest many-output-values-test
-  (let [results (atom [])
-        e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        e3 (eventstream "e3")
-        e4 (eventstream "e4")
-        numbers (seqstream (range))
-        n (network (rn/make-link "items" [e1] [e2]
-                                :link-fn
-                                (fn [{:keys [input-rvts output-reactives] :as input}]
-                                  (let [vs (:items (rn/fvalue input-rvts))]
-                                    {:output-rvts (rn/enqueue-values vs (first output-reactives))})))
-                   (link name [e2] [e3])
-                   (link vector [numbers e3] [e4])
-                   (link (partial swap! results conj) [e4] []))]
-    (rn/update-and-propagate! n (rv e1 {:items [:foo :bar :baz]}))
-    (is (= [[0 "foo"] [1 "bar"] [2 "baz"]] @results))))
+  (let [r       (atom [])
+        e1      (eventstream "e1")
+        e2      (eventstream "e2")
+        e3      (eventstream "e3")
+        e4      (eventstream "e4")
+        numbers (seqstream (range))]
+    (with-network [(rn/make-link "items" [e1] [e2]
+                                   :link-fn
+                                   (fn [{:keys [input-rvts output-reactives] :as input}]
+                                     (let [vs (:items (rn/fvalue input-rvts))]
+                                       {:output-rvts (rn/enqueue-values vs (first output-reactives))})))
+                    (link name [e2] [e3])
+                    (link vector [numbers e3] [e4])
+                    (link (partial swap! r conj) [e4] [])]
+      (push! e1 {:items [:foo :bar :baz]})
+      (is (= [[0 "foo"] [1 "bar"] [2 "baz"]] @r)))))
 
 
 (deftest add-remove-links-test
@@ -159,33 +148,33 @@
         e3 (eventstream "e3")
         l2 (link identity [e2] [e3])
         l1 (rn/make-link "add-remove" [e1] [e2]
-                        :link-fn
-                        (fn [_]
-                          {:add [l2]
-                           :remove-by #(= (:outputs %) [e2])}))
-        n (network l1)
-        n-after (rn/update-and-propagate! n (rv e1 :foo))]
-    (is (= 1 (-> n-after :links count)))
-    (is (= (:label l2) (-> n-after :links first :label)))))
+                           :link-fn
+                           (fn [_]
+                             {:add [l2]
+                              :remove-by #(= (:outputs %) [e2])}))]
+    (with-network [l1]
+      (push! e1 :foo)
+      (is (= 1 (-> rn/*engine* rn/network :links count)))
+      (is (= (:label l2) (-> rn/*engine* rn/network :links first :label))))))
 
 
 (deftest dead-link-remove-test
-  (let [e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        n (network (link identity [e1] [e2]))
-        n-after (rn/complete-and-propagate! n e1)]
-    (is (= 0 (-> n-after :links count)))))
+  (let [e1      (eventstream "e1")
+        e2      (eventstream "e2")]
+    (with-network [(link identity [e1] [e2])]
+      (push! e1 ::rn/completed)
+      (is (= 0 (-> rn/*engine* rn/network :links count))))))
 
 
 (deftest complete-fn-test
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
-        e3 (eventstream "e3")
-        n (network (assoc (link identity [e1] [e2])
-                     :complete-fn (fn [_ r] {:add [(link identity [e2] [e3])]})))
-        n-after (rn/complete-and-propagate! n e1)]
-    (is (= 0 (->> n-after :links (filter #(= (:outputs %) [e2])) count)))
-    (is (= 1 (->> n-after :links (filter #(= (:outputs %) [e3])) count)))))
+        e3 (eventstream "e3")]
+    (with-network [(assoc (link identity [e1] [e2])
+                     :complete-fn (fn [_ r] {:add [(link identity [e2] [e3])]}))]
+      (push! e1 ::rn/completed)
+      (is (= 0 (->> rn/*engine* rn/network :links (filter #(= (:outputs %) [e2])) count)))
+      (is (= 1 (->> rn/*engine* rn/network :links (filter #(= (:outputs %) [e3])) count))))))
 
 
 (deftest large-mult-filter-merge-test
@@ -211,46 +200,51 @@
                                          :link-fn (fn [{:keys [input-rvts] :as input}]
                                                     (swap! results conj (rn/fvalue input-rvts))
                                                     {}))))
-        n        (apply network links)
         values   (repeatedly 1000 #(rand-int (* distance c)))]
-    (reduce rn/update-and-propagate! n (map #(hash-map i [% (rn/now)]) values))
+    (with-network links
+      (apply push! (cons i values)))
     (is (= values @results))))
 
 
 (deftest complete-on-remove-test
   (let [e1 (eventstream "e1")
-          e2 (eventstream "e2")
-          e3 (eventstream "e3")
-          e4 (eventstream "e4")
-          results (atom [])
-          n (network (rn/make-link "e1,e2->e3" [e1 e2] [e3]
-                                   :link-fn (fn [{:keys [input-rvts] :as input}]
-                                              (let [v (reduce + (rn/values input-rvts))]
-                                                (rn/make-result-map input v)) )
-                                   :complete-on-remove [e3])
-                     (rn/make-link "e3->e4" [e3] [e4]
-                                   :complete-on-remove [e4])
-                     (link (partial swap! results conj) [e4] []))]
-      (with-network n
-          (rn/update-and-propagate! n {e1 [1 (rn/now)] e2 [2 (rn/now)]})
-          (is (= [3] @results))
-          (rn/complete-and-propagate! n e1)
-          (Thread/sleep 300)
-          (is (rn/completed? e1))
-          (is (not (rn/completed? e2)))
-          (is (rn/completed? e3))
-          (is (rn/completed? e4)))))
+        e2 (eventstream "e2")
+        e3 (eventstream "e3")
+        e4 (eventstream "e4")
+        r  (atom [])]
+    (rn/with-engine
+      (rn/agent-engine
+       (rn/make-network "" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
+                                          :link-fn (fn [{:keys [input-rvts] :as input}]
+                                                     (let [v (reduce + (rn/values input-rvts))]
+                                                       (rn/make-result-map input v)) )
+                                          :complete-on-remove [e3])
+                            (rn/make-link "e3->e4" [e3] [e4]
+                                          :complete-on-remove [e4])
+                            (link (partial swap! r conj) [e4] [])]))
+      (push! e1 1 e2 2)
+      (Thread/sleep 200)
+      (is (= [3] @r))
+      (push! e1 ::rn/completed)
+      (Thread/sleep 200)
+      (is (rn/completed? e1))
+      (is (not (rn/completed? e2)))
+      (is (rn/completed? e3))
+      (is (rn/completed? e4)))))
 
 
 (deftest flatmap-test
-  (let [f (fn [c] (let [e (eventstream (str "E" c))]
-                    (dotimes [i c] (rn/deliver! e [i (rn/now)]))
-                    (rn/deliver! e [::rn/completed (rn/now)])
-                    e))
-        e1 (eventstream "e1")
-        e2 (eventstream "e2")
-        results (atom [])
-        n (network (let [q-atom (atom {:queue []
+  (let [f        (fn [c]
+                   (let [e (eventstream (str "E" c))]
+                     (dotimes [i c] (rn/deliver! e [i (rn/now)]))
+                     (rn/deliver! e [::rn/completed (rn/now)])
+                     e))
+        e1       (eventstream "e1")
+        e2       (eventstream "e2")
+        r        (atom [])
+        ranges   (range 2 5)
+        expected (mapcat #(range %) ranges)]
+    (with-network [(let [q-atom (atom {:queue []
                                        :active nil})
                          switch (fn switch [{:keys [queue active] :as state}]
                                   (if-let [r (first queue)]
@@ -258,22 +252,18 @@
                                       {:queue (vec (rest queue))
                                        :active r
                                        :add [(rn/make-link "" [r] [e2]
-                                                          :complete-fn
-                                                          (fn [_ r]
-                                                            (merge (swap! q-atom switch)
-                                                                   {:remove-by #(= [r] (:inputs %))})))]}
+                                                           :complete-fn
+                                                           (fn [_ r]
+                                                             (merge (swap! q-atom switch)
+                                                                    {:remove-by #(= [r] (:inputs %))})))]}
                                       state)
                                     state))
                          enqueue (fn [state r]
                                    (switch (update-in state [:queue] conj r)))]
                      (rn/make-link "e1->e2" [e1] [e2]
-                                  :link-fn (fn [{:keys [input-rvts] :as input}]
-                                             (swap! q-atom enqueue (f (rn/fvalue input-rvts))))))
-                   (link (partial swap! results conj) [e2] []))
-        ranges (range 2 3)
-        expected (mapcat #(range %) ranges)
-        n-after (->> ranges
-                     (map (partial rv e1))
-                     (reduce rn/update-and-propagate! n))]
-    (is (= expected @results))
-    (is (= 3 (-> n-after :links count)))))
+                                   :link-fn (fn [{:keys [input-rvts] :as input}]
+                                              (swap! q-atom enqueue (f (rn/fvalue input-rvts))))))
+                   (link (partial swap! r conj) [e2] [])]
+      (apply push! (cons e1 ranges))
+      (is (= expected @r))
+      (is (= 3 (-> rn/*engine* rn/network :links count))))))

@@ -6,10 +6,8 @@
 ;; A Behavior implementation of the IReactive protocol
 
 
-(defrecord Behavior [n-id label a new?]
+(defrecord Behavior [label a new?]
   IReactive
-  (network-id [this]
-    n-id)
   (last-value [this]
     (first @a))
   (available? [r]
@@ -39,10 +37,8 @@
 ;; A buffered Eventstream implementation of the IReactive protocol
 
 
-(defrecord Eventstream [n-id label a n]
+(defrecord Eventstream [label a n]
   IReactive
-  (network-id [this]
-    n-id)
   (last-value [this]
     (-> a deref :last-occ first))
   (available? [this]
@@ -81,10 +77,8 @@
 ;; ---------------------------------------------------------------------------
 ;; An IReactive implementation based on a sequence
 
-(defrecord SeqStream [n-id seq-val-atom eventstream?]
+(defrecord SeqStream [seq-val-atom eventstream?]
   IReactive
-  (network-id [this]
-    n-id)
   (last-value [this]
     (-> seq-val-atom deref :last-occ first))
   (available? [this]
