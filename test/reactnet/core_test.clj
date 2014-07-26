@@ -86,6 +86,34 @@
       (is (= 2 @r)))))
 
 
+(deftest weakref-test
+  (with-network []
+    (let [e1 (eventstream "e1")
+          e2 (eventstream "e2")]
+      (rn/add-links! rn/*engine* (rn/make-link "e1->e2" [e1] [e2]))
+      (is (= 1 (-> rn/*engine* rn/network :links count))))
+    (System/gc)
+    (rn/execute rn/*engine* rn/update-and-propagate! [nil])
+    (is (= 0 (-> rn/*engine* rn/network :links count)))))
+
+
+(deftest cycle-test
+  (let [r  (atom [])
+        e1 (eventstream "e1")]
+    (rn/with-engine
+      (rn/agent-engine
+       (rn/make-network "test" [(rn/make-link "inc-e1" [e1] [e1]
+                                              :link-fn (fn [{:keys [input-rvts] :as input}]
+                                                         (let [v (inc (rn/fvalue input-rvts))]
+                                                           (if (<= v 3)
+                                                             (rn/make-result-map input v)
+                                                             {:remove-by #(= [e1] (rn/link-outputs %))}))))
+                                (link (partial swap! r conj) [e1] [])]))
+      (push! e1 1)
+      (Thread/sleep 200)
+      (is (= [1 2 3] @r)))))
+
+
 (deftest queuing-test
   (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
@@ -216,14 +244,14 @@
         r  (atom [])]
     (rn/with-engine
       (rn/agent-engine
-       (rn/make-network "" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
-                                          :link-fn (fn [{:keys [input-rvts] :as input}]
-                                                     (let [v (reduce + (rn/values input-rvts))]
-                                                       (rn/make-result-map input v)) )
-                                          :complete-on-remove [e3])
-                            (rn/make-link "e3->e4" [e3] [e4]
-                                          :complete-on-remove [e4])
-                            (link (partial swap! r conj) [e4] [])]))
+       (rn/make-network "test" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
+                                              :link-fn (fn [{:keys [input-rvts] :as input}]
+                                                         (let [v (reduce + (rn/values input-rvts))]
+                                                           (rn/make-result-map input v)) )
+                                              :complete-on-remove [e3])
+                                (rn/make-link "e3->e4" [e3] [e4]
+                                              :complete-on-remove [e4])
+                                (link (partial swap! r conj) [e4] [])]))
       (push! e1 1 e2 2)
       (Thread/sleep 200)
       (is (= [3] @r))

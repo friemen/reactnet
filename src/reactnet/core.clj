@@ -6,7 +6,6 @@
 ;; TODOs
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
-;; - Create unit test for cyclic deps
 ;; - Add pause! and resume! for the network
 ;; - Graphviz visualization of the network
 ;; - Support core.async
@@ -599,7 +598,7 @@
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]
-         (push! r v t))
+         (push! *engine* r v t))
     
        (if unchanged?
          (assoc network :unchanged? true)
