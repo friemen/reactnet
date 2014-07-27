@@ -88,14 +88,35 @@
 
 
 (deftest buffer-test
-  (let [r   (atom [])
-        e1  (r/eventstream "e1")
-        c   (->> e1 (r/buffer 2) (r/swap-conj! r))]
-    (apply push-and-wait! (interleave (repeat e1) [1 2 3 4 5 6 7]))
-    (is (= [[1 2] [3 4] [5 6]] @r))
-    (complete! e1)
-    (wait)
-    (is (= [[1 2] [3 4] [5 6] [7]] @r))))
+  (testing "Buffer by number of items"
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 (r/buffer-c 2) (r/swap-conj! r))]
+      (apply push-and-wait! (interleave (repeat e1) [1 2 3 4 5 6 7]))
+      (is (= [[1 2] [3 4] [5 6]] @r))
+      (complete! e1)
+      (wait)
+      (is (= [[1 2] [3 4] [5 6] [7]] @r))))
+  (testing "Buffer by time"
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 (r/buffer-t 500) (r/swap-conj! r))]
+      (push-and-wait! e1 42)
+      (is (= [] @r))
+      (wait 500)
+      (is (= [[42]] @r))))
+  (testing "Buffer by time and number of items"
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 (r/buffer 3 500) (r/swap-conj! r))]
+      (push-and-wait! e1 42 e1 43 e1 44 e1 45)
+      (is (= [[42 43 44]] @r))
+      (wait 500)
+      (is (= [[42 43 44] [45]] @r))
+      (push! e1 46)
+      (complete! e1)
+      (wait)
+      (is (= [[42 43 44] [45] [46]] @r)))))
 
 
 (deftest concat-test

@@ -225,22 +225,47 @@
 
 
 (defn buffer
-  [no reactive]  
-  (let [b   (atom {:queue [] :dequeued nil})
-        enq (fn [{:keys [queue] :as q} x]
-              (if (>= (c/count queue) no)
-                (assoc q :queue [x] :dequeued queue)
-                (assoc q :queue (conj queue x) :dequeued nil)))]
+  [no millis reactive]  
+  (let [b      (atom {:queue [] :dequeued nil})
+        task   (atom nil)
+        enq    (fn [{:keys [queue] :as q} x]
+                 (if (and (> no 0) (>= (c/count queue) no))
+                   (assoc q :queue [x] :dequeued queue)
+                   (assoc q :queue (conj queue x) :dequeued nil)))
+        deq    (fn [{:keys [queue] :as q}]
+                 (assoc q :queue [] :dequeued queue))
+        engine *engine*]
     (derive-new eventstream "buffer" [reactive]
                 :link-fn
-                (fn [{:keys [input-rvts] :as input}]
-                  (if-let [vs (:dequeued (swap! b enq (fvalue input-rvts)))]
-                    (make-result-map input vs)))
+                (fn [{:keys [input-rvts output-reactives] :as input}]
+                  (let [output         (first output-reactives)
+                        {vs :dequeued
+                         queue :queue} (swap! b enq (fvalue input-rvts))]
+                    (when (and (= 1 (c/count queue)) (> millis 0))
+                      (swap! task (fn [_]
+                                    (sched/once scheduler millis
+                                                (fn []
+                                                  (let [vs (:dequeued (swap! b deq))]
+                                                    (when (seq vs)
+                                                      (push! engine output vs))))))))
+                    (if (seq vs)
+                      (do (some-> task deref sched/cancel)
+                          (make-result-map input vs)))))
                 :complete-fn
                 (fn [link r]
                   (let [vs (:queue @b)]
+                    (some-> task deref sched/cancel)
                     (if (seq vs)
                       {:output-rvts (assign-value vs (-> link link-outputs first))}))))))
+
+(defn buffer-t
+  [millis reactive]
+  (buffer -1 millis reactive))
+
+
+(defn buffer-c
+  [no reactive]
+  (buffer no -1 reactive))
 
 
 (defn concat
