@@ -268,8 +268,8 @@
         e1     (r/eventstream "e1")
         c      (->> e1 (r/reduce + 0) (r/swap-conj! r))]
     (apply push-and-wait! (interleave (repeat e1) values))
-    (complete! e1)
     (is (= [] @r))
+    (complete! e1)
     (wait)
     (is (= [10] @r))))
 
