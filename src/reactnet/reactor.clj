@@ -29,7 +29,7 @@
 
 (defn behavior
   ([label]
-     (behavior label nil))
+     (behavior "" nil))
   ([label value]
      (Behavior. label
                 (atom [value (now)])
@@ -67,14 +67,14 @@
   {:async f})
 
 
-(defn unpack-fn
+(defn- unpack-fn
   [fn-or-map]
   (if-let [f (:async fn-or-map)]
     [make-async-link-fn f]
     [make-sync-link-fn fn-or-map]))
 
 
-(defn fn-spec?
+(defn- fn-spec?
   [f]
   (or (instance? clojure.lang.IFn f)
       (and (map? f) (instance? clojure.lang.IFn (:async f)))))
@@ -543,3 +543,93 @@
 
 
 
+;; ---------------------------------------------------------------------------
+;; Expression lifting
+
+
+(defn ^:no-doc as-behavior
+  [label x]
+  (if (behavior? x)
+     x
+    (behavior label x)))
+
+
+(defn ^:no-doc lift-fn
+  [f & reactives]
+  {:pre [(fn-spec? f) (every? reactive? reactives)]
+   :post [(reactive? %)]}
+  (derive-new behavior "lift-fn" reactives
+              :link-fn
+              (make-sync-link-fn f)))
+
+
+(defn ^:no-doc lift-if
+  [test-b then-b else-b]
+  (derive-new behavior "lift-if" [test-b then-b else-b]
+              :link-fn
+              (make-sync-link-fn (fn [test then else]
+                                   (if test then else)))))
+
+
+(defn ^:no-doc lift-cond
+  [& test-expr-bs]
+  (derive-new behavior "lift-cond" test-expr-bs
+              :link-fn
+              (make-sync-link-fn (fn [& args]
+                                   (let [[test-value
+                                          expr-value] (->> args
+                                                           (partition 2)
+                                                           (drop-while (comp not first))
+                                                           first)]
+                                     expr-value)))))
+
+(defn- lift-exprs
+  [exprs]
+  (c/map (fn [expr] `(lift ~expr)) exprs))
+
+
+(defn- lift-dispatch
+  [expr]
+  (if (list? expr)
+    (if (#{'if 'cond 'let} (first expr))
+      (first expr)
+      'fn-apply)
+    'symbol))
+
+
+(defmulti ^:private lift*
+  #'lift-dispatch)
+
+
+(defmacro lift
+  [expr]
+  (lift* expr))
+
+
+(defmethod lift* 'symbol
+  [expr]
+  `(as-behavior ~(str expr) ~expr))
+
+
+(defmethod lift* 'fn-apply
+  [[f & args]]
+  `(lift-fn ~f ~@(lift-exprs args)))
+
+
+(defmethod lift* 'if
+  [[_ test-expr then-expr else-expr]]
+  `(lift-if (lift ~test-expr) (lift ~then-expr) (lift ~else-expr)))
+
+
+(defmethod lift* 'let
+  [[_ bindings & exprs]]
+  `(let ~(into []
+               (c/mapcat (fn [[sym expr]]
+                           [sym `(lift ~expr)])
+                         (partition 2 bindings)))
+     ~@(lift-exprs exprs)))
+
+
+(defmethod lift* 'cond
+  [[_ & exprs]]
+  `(lift-cond ~@(lift-exprs exprs)))

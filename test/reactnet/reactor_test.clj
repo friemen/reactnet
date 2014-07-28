@@ -311,3 +311,49 @@
     (is (= [] @r))
     (wait 500)
     (is (= [:baz] @r))))
+
+
+;; ---------------------------------------------------------------------------
+;; Tests for expression lifting
+
+
+(deftest lift-fn-test
+  (let [x (r/behavior "x" 2)
+        y (r/behavior "y" 2)
+        z (r/lift (* 3 x y))]
+    (wait)
+    (is (= @z 12))
+    (push-and-wait! x 3 y 1)
+    (is (= @z 9))))
+
+
+(deftest lift-if-test
+  (let [x (r/behavior "x" 2)
+        z (r/lift (if (> x 2) "x > 2" "x <= 2"))]
+    (wait)
+    (is (= @z "x <= 2"))
+    (push-and-wait! x 3)
+    (is (= @z "x > 2"))))
+
+
+(deftest lift-let-test
+  (let [x (r/behavior "x" 2)
+        z (r/lift (let [y (+ x 2)] (+ x y)))]
+    (wait)
+    (is (= @z 6))
+    (push-and-wait! x 3)
+    (is (= @z 8))))
+
+
+(deftest lift-cond-test
+  (let [x (r/behavior "x" 2)
+        z (r/lift (cond
+                   (<= x 1) (+ 9 x)
+                   (<= x 4) (+ 4 x)
+                   :else    x))]
+    (wait)
+    (is (= @z 6))
+    (push-and-wait! x 4)
+    (is (= @z 8))
+    (push-and-wait! x 10)
+    (is (= @z 10))))

@@ -97,8 +97,11 @@
 ;; propagation/updates to it are scheduled.
 
 (defprotocol INetworkRef
-  (update [e f args])
-  (network [e]))
+  (update [netref f args]
+    "Apply f to the current network state (as first arg) and the
+    arguments given in the args vector.")
+  (network [netref]
+    "Return the network state."))
 
 
 
@@ -740,6 +743,16 @@
 ;; Tools for implementing Link functions
 
 
+(defprotocol IExecutor
+  (execute [e f]
+    "Execute a no-arg function."))
+
+
+(deftype FutureExecutor []
+  IExecutor
+  (execute [e f] (future (f))))
+
+
 (defn safely-apply
   "Applies f to xs, and catches exceptions.
   Returns a pair of [result exception], at least one of them being nil."
@@ -763,18 +776,20 @@
 (defn make-async-link-fn
   "Takes a function and wraps it's execution in a future.
   Any result will be pushed asynchronously to the network."
-  ([f]
+  ([executor f]
      (make-async-link-fn f make-result-map))
-  ([f result-fn]
+  ([executor f result-fn]
      (let [netref *netref*]
        (fn [{:keys [input-reactives input-rvts] :as input}]
-         (future (let [[v ex]      (safely-apply f (values input-rvts))
-                       result-map  (result-fn input v ex)]
-                   ;; send changes / values to netref
-                   (when (or (seq (:add result-map)) (:remove-by result-map))
-                     (update netref update-from-results! [[result-map]]))
-                   (doseq [[r [v t]] (:output-rvts result-map)]
-                     (push! r v))))
+         (execute executor
+                  (fn []
+                    (let [[v ex]      (safely-apply f (values input-rvts))
+                          result-map  (result-fn input v ex)]
+                      ;; send changes / values to netref
+                      (when (or (seq (:add result-map)) (:remove-by result-map))
+                        (update netref update-from-results! [[result-map]]))
+                      (doseq [[r [v t]] (:output-rvts result-map)]
+                        (push! r v)))))
          nil))))
 
 
