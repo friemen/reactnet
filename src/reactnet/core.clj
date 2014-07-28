@@ -59,7 +59,7 @@
 ;;   :outputs             Output reactives, each wrapped in WeakReference
 ;;   :link-fn             A link function (see below) that evaluates input reactive values
 ;;   :error-fn            An error handler function [result ex -> Result]
-;;   :complete-fn         A function [reactive -> nil] called when one of the
+;;   :complete-fn         A function [Link Reactive -> nil] called when one of the
 ;;                        input reactives becomes completed
 ;;   :complete-on-remove  A seq of reactives to be completed when this link is removed
 ;;   :level               The level within the reactive network
@@ -127,10 +127,11 @@
   (mapv value rvts))
 
 
-(defn assign-value
+(defn single-value
   "Produces a sequence with exactly one RVT pair assigned to Reactive
   r."
   ([v r]
+     {:pre [(satisfies? IReactive r)]}
      [[r [v (now)]]]))
 
 
@@ -138,6 +139,7 @@
   "Produces a RVT seq where the value v is assigned to every Reactive
   in rs."
   [v rs]
+  {:pre [(every? (partial satisfies? IReactive) rs)]}
   (let [t (now)]
     (for [r rs] [r [v t]])))
 
@@ -146,6 +148,7 @@
   "Produces an RVT seq where values are position-wise assigned to
   reactives."
   [vs rs]
+  {:pre [(every? (partial satisfies? IReactive) rs)]}
   (let [t (now)]
     (map (fn [r v] [r [v t]]) rs vs)))
 
@@ -154,6 +157,7 @@
   "Produces an RVT seq where all values in vs are assigned to the same
   Reactive r."
   [vs r]
+  {:pre [(satisfies? IReactive r)]}
   (let [t (now)]
     (for [v vs] [r [v t]])))
 
@@ -222,7 +226,8 @@
   [label inputs outputs
    & {:keys [link-fn error-fn complete-fn complete-on-remove]
       :or {link-fn default-link-fn}}]
-  {:pre [(seq inputs)]}
+  {:pre [(seq inputs)
+         (every? (partial satisfies? IReactive) (concat inputs outputs))]}
   {:label label
    :inputs inputs
    :outputs (wref-wrap outputs)

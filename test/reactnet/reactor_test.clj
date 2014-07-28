@@ -87,6 +87,24 @@
     (is (rn/completed? c))))
 
 
+(deftest any-test
+  (testing "The first true results in true."
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 r/any (r/swap-conj! r))]
+      (apply push-and-wait! (interleave (repeat e1) [false true]))
+      (is (= [true] @r))))
+  (testing "False is emitted only after completion."
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 r/any (r/swap-conj! r))]
+      (apply push-and-wait! (interleave (repeat e1) [false false]))
+      (is (= [] @r))
+      (complete! e1)
+      (wait)
+      (is (= [false] @r)))))
+
+
 (deftest buffer-test
   (testing "Buffer by number of items"
     (let [r   (atom [])
@@ -164,6 +182,31 @@
     (is (= [:foo] @r))))
 
 
+(deftest every-test
+  (testing "Direct completion emits true."
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 r/every (r/swap-conj! r))]
+      (complete! e1)
+      (wait)
+      (is (= [true] @r))))
+  (testing "The first False results in False."
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 r/every (r/swap-conj! r))]
+      (apply push-and-wait! (interleave (repeat e1) [true false]))
+      (is (= [false] @r))))
+  (testing "True is emitted only after completion."
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 r/every (r/swap-conj! r))]
+      (apply push-and-wait! (interleave (repeat e1) [true true]))
+      (is (= [] @r))
+      (complete! e1)
+      (wait)
+      (is (= [true] @r)))))
+
+
 (deftest filter-test
   (let [r        (atom [])
         values   (range 10)
@@ -219,12 +262,24 @@
 
 
 (deftest reduce-test
-  (let [values (range 1 5)
+  (let [r      (atom [])
+        values (range 1 5)
         e1     (r/eventstream "e1")
-        b      (->> e1 (r/reduce + 0))]
-    (is (r/behavior? b))
+        c      (->> e1 (r/reduce + 0) (r/swap-conj! r))]
     (apply push-and-wait! (interleave (repeat e1) values))
-    (is (= @b (reduce + values)))))
+    (complete! e1)
+    (is (= [] @r))
+    (wait)
+    (is (= [10] @r))))
+
+
+(deftest scan-test
+  (let [r      (atom [])
+        values (range 1 5)
+        e1     (r/eventstream "e1")
+        c      (->> e1 (r/scan + 0) (r/swap-conj! r))]
+    (apply push-and-wait! (interleave (repeat e1) values))
+    (is (= [1 3 6 10] @r))))
 
 
 (deftest switch-test

@@ -1,6 +1,6 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay filter merge map mapcat reduce remove take])
+  (:refer-clojure :exclude [concat count delay filter merge map mapcat reduce remove some take])
   (:require [clojure.core :as c]
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
@@ -72,6 +72,16 @@
     [make-async-link-fn f]
     [make-sync-link-fn fn-or-map]))
 
+
+(defn reactive?
+  [reactive]
+  (satisfies? IReactive reactive))
+
+
+(defn fn-spec?
+  [f]
+  (or (instance? clojure.lang.IFn f)
+      (and (map? f) (instance? clojure.lang.IFn (:async f)))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -210,22 +220,35 @@
                                    :complete-on-remove [new-r]))
     new-r))
 
+(declare match)
+
 
 (defn amb
   [& reactives]
+  {:pre [(every? reactive? reactives)]
+   :post [(reactive? %)]}
   (let [new-r   (eventstream "amb")
         f       (fn [{:keys [input-reactives input-rvts] :as input}]
                   (let [r (first input-reactives)]
                     {:remove-by #(= (link-outputs %) [new-r])
                      :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
-                     :output-rvts (assign-value (fvalue input-rvts) new-r)}))
+                     :output-rvts (single-value (fvalue input-rvts) new-r)}))
         links   (->> reactives (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
     (apply (partial add-links! *engine*) links)
     new-r))
 
 
+(defn any
+  ([reactive]
+     (any identity reactive))
+  ([pred reactive]
+     (match pred true false reactive)))
+
+
 (defn buffer
   [no millis reactive]  
+  {:pre [(number? no) (number? millis) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [b      (atom {:queue [] :dequeued nil})
         task   (atom nil)
         enq    (fn [{:keys [queue] :as q} x]
@@ -256,7 +279,7 @@
                   (let [vs (:queue @b)]
                     (some-> task deref sched/cancel)
                     (if (seq vs)
-                      {:output-rvts (assign-value vs (-> link link-outputs first))}))))))
+                      {:output-rvts (single-value vs (-> link link-outputs first))}))))))
 
 (defn buffer-t
   [millis reactive]
@@ -270,6 +293,8 @@
 
 (defn concat
   [& reactives]
+  {:pre [(every? reactive? reactives)]
+   :post [(reactive? %)]}
   (let [new-r   (eventstream "concat")
         state   (atom (make-reactive-queue new-r reactives))
         link    (-> (swap! state switch-reactive state) :add first)]
@@ -279,6 +304,8 @@
 
 (defn count
   [reactive]
+  {:pre [(reactive? reactive)]
+   :post [(reactive? %)]}
   (let [c (atom 0)]
     (derive-new eventstream "count" [reactive]
                 :link-fn
@@ -288,6 +315,8 @@
 
 (defn debounce
   [millis reactive]
+  {:pre [(number? millis) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [task (atom nil)]
     (derive-new eventstream "debounce" [reactive]
                 :link-fn
@@ -305,6 +334,8 @@
 
 (defn delay
   [millis reactive]
+  {:pre [(number? millis) (reactive? reactive)]
+   :post [(reactive? %)]}
   (derive-new eventstream "delay" [reactive]
               :link-fn
               (fn [{:keys [input-rvts output-reactives] :as input}]
@@ -314,9 +345,17 @@
                   (sched/once scheduler millis #(push! engine output v))
                   nil))))
 
+(defn every
+  ([reactive]
+     (every identity reactive))
+  ([pred reactive]
+     (match (complement pred) false true reactive)))
+
 
 (defn filter
   [pred reactive]
+  {:pre [(fn-spec? pred) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn pred)]
     (derive-new eventstream "filter" [reactive]
                 :link-fn
@@ -334,6 +373,8 @@
 
 (defn map
   [f & reactives]
+  {:pre [(fn-spec? f) (every? reactive? reactives)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)]
     (derive-new eventstream "map" reactives
                 :link-fn
@@ -342,6 +383,8 @@
 
 (defn mapcat'
   [f reactive]
+  {:pre [(fn-spec? f) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)
         new-r    (eventstream "mapcat'")
         state    (atom (make-reactive-queue new-r)) ]
@@ -356,6 +399,8 @@
 
 (defn mapcat
   [f & reactives]
+  {:pre [(fn-spec? f) (every? reactive? reactives)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)]
     (derive-new eventstream "mapcat" reactives
                 :link-fn
@@ -366,8 +411,26 @@
                                     :exception ex))))))
 
 
+(defn match
+  ([pred match-value default-value reactive]
+  {:pre [(fn-spec? pred) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (let [[make-link-fn pred] (unpack-fn pred)]
+    (derive-new eventstream "match" [reactive]
+                :link-fn
+                (make-link-fn pred
+                              (fn [{:keys [output-reactives]} v ex]
+                                (if v
+                                  {:output-rvts (single-value match-value (first output-reactives))
+                                   :remove-by #(= output-reactives (link-outputs %))})))
+                :complete-fn (fn [l r]
+                               {:output-rvts (single-value default-value (-> l link-outputs first))})))))
+
+
 (defn merge
   [& reactives]
+  {:pre [(every? reactive? reactives)]
+   :post [(reactive? %)]}
   (let [new-r   (eventstream "merge")
         links   (->> reactives (c/map #(make-link "merge" [%] [new-r])))]
     (apply (partial add-links! *engine*) links)
@@ -375,13 +438,29 @@
 
 
 (defn reduce
-  [f initial-value & reactives]
+  [f initial-value reactive]
+  {:pre [(fn-spec? f) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)
         accu             (atom initial-value)]
-    (derive-new behavior "reduce" reactives
+    (derive-new eventstream "reduce" [reactive]
                 :link-fn
-                (make-link-fn (fn [& vs]
-                                (swap! accu #(apply (partial f %) vs)))
+                (make-link-fn (fn [v] (swap! accu f v))
+                              (constantly {}))
+                :complete-fn
+                (fn [l r]
+                  {:output-rvts (single-value @accu (-> l link-outputs first))}))))
+
+
+(defn scan
+  [f initial-value reactive]
+  {:pre [(reactive? reactive)]
+   :post [(reactive? %)]}
+  (let [[make-link-fn f] (unpack-fn f)
+        accu             (atom initial-value)]
+    (derive-new eventstream "scan" [reactive]
+                :link-fn
+                (make-link-fn (fn [v] (swap! accu f v))
                               make-result-map))))
 
 
@@ -392,6 +471,8 @@
 
 (defn switch
   [reactive]
+  {:pre [(reactive? reactive)]
+   :post [(reactive? %)]}
   (let [new-r (eventstream "switch")]
     (add-links! *engine*
                 (make-link "switcher" [reactive] []
@@ -399,14 +480,15 @@
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
                                {:remove-by #(= (link-outputs %) [new-r])
-                                :add (if (satisfies? IReactive r)
+                                :add (if (reactive? r)
                                        [(make-link "switch" [r] [new-r])])}))))
     new-r))
 
 
 (defn subscribe
   [f reactive]
-  {:pre [(fn? f)]}
+  {:pre [(fn-spec? f) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)]
     (add-links! *engine* (make-link "subscriber" [reactive] []
                                     :link-fn (make-link-fn f (constantly {}))))
@@ -420,6 +502,8 @@
 
 (defn take
   [no reactive]
+  {:pre [(number? no) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [new-r   (eventstream "take")
         c       (atom no)]
     (add-links! *engine*
@@ -437,6 +521,8 @@
 
 (defn throttle
   [f millis max-queue-size reactive]
+  {:pre [(fn-spec? f) (number? millis) (number? max-queue-size) (reactive? reactive)]
+   :post [(reactive? %)]}
   (let [queue-atom (atom (make-queue max-queue-size))
         new-r  (derive-new eventstream "throttle" [reactive]
                            :link-fn
