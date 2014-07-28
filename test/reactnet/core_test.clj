@@ -1,6 +1,7 @@
 (ns reactnet.core-test
   (:require [clojure.test :refer :all]
             [reactnet.core :as rn]
+            [reactnet.engines :as re]
             [reactnet.reactives])
   (:import [reactnet.reactives SeqStream Behavior Eventstream]))
 
@@ -34,7 +35,7 @@
 
 (defmacro with-network
   [links & exprs]
-  `(rn/with-engine (rn/atom-engine (rn/make-network "" ~links))
+  `(rn/with-engine (re/atom-engine (rn/make-network "" ~links))
      ~@exprs))
 
 (defn push!
@@ -101,7 +102,7 @@
   (let [r  (atom [])
         e1 (eventstream "e1")]
     (rn/with-engine
-      (rn/agent-engine
+      (re/agent-engine
        (rn/make-network "test" [(rn/make-link "inc-e1" [e1] [e1]
                                               :link-fn (fn [{:keys [input-rvts] :as input}]
                                                          (let [v (inc (rn/fvalue input-rvts))]
@@ -243,7 +244,7 @@
         e4 (eventstream "e4")
         r  (atom [])]
     (rn/with-engine
-      (rn/agent-engine
+      (re/agent-engine
        (rn/make-network "test" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
                                               :link-fn (fn [{:keys [input-rvts] :as input}]
                                                          (let [v (reduce + (rn/values input-rvts))]

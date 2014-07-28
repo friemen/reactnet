@@ -5,7 +5,8 @@
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
-            [reactnet.core :refer :all])
+            [reactnet.core :refer :all]
+            [reactnet.engines :refer [agent-engine]])
   (:import [clojure.lang PersistentQueue]
            [reactnet.reactives Behavior Eventstream SeqStream]))
 
@@ -71,11 +72,6 @@
   (if-let [f (:async fn-or-map)]
     [make-async-link-fn f]
     [make-sync-link-fn fn-or-map]))
-
-
-(defn reactive?
-  [reactive]
-  (satisfies? IReactive reactive))
 
 
 (defn fn-spec?

@@ -6,7 +6,7 @@
 ;; TODOs
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
-;; - Add pause! and resume! for the network
+;; - Add pause! and resume! for the engine
 ;; - Graphviz visualization of the network
 ;; - Support core.async
 ;; - Support interceptor?
@@ -49,8 +49,6 @@
 (defprotocol IEngine
   (execute [e f args])
   (network [e]))
-
-(def ^:dynamic *engine* nil)
 
 ;; Link:
 ;; A map connecting input and output reactives via a function.
@@ -100,6 +98,19 @@
 ;;   :links-map           Map {rid -> Seq of links} (derived)
 
 
+
+
+(def ^:dynamic *engine* nil)
+
+;; ---------------------------------------------------------------------------
+;; Functions that operate on reactives.
+
+(defn reactive?
+  "Returns true if the reactive satisfies IReactive."
+  [reactive]
+  (satisfies? IReactive reactive))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Functions to deal with RVTs
 
@@ -131,7 +142,7 @@
   "Produces a sequence with exactly one RVT pair assigned to Reactive
   r."
   ([v r]
-     {:pre [(satisfies? IReactive r)]}
+     {:pre [(reactive? r)]}
      [[r [v (now)]]]))
 
 
@@ -139,7 +150,7 @@
   "Produces a RVT seq where the value v is assigned to every Reactive
   in rs."
   [v rs]
-  {:pre [(every? (partial satisfies? IReactive) rs)]}
+  {:pre [(every? reactive? rs)]}
   (let [t (now)]
     (for [r rs] [r [v t]])))
 
@@ -148,7 +159,7 @@
   "Produces an RVT seq where values are position-wise assigned to
   reactives."
   [vs rs]
-  {:pre [(every? (partial satisfies? IReactive) rs)]}
+  {:pre [(every? reactive? rs)]}
   (let [t (now)]
     (map (fn [r v] [r [v t]]) rs vs)))
 
@@ -157,7 +168,7 @@
   "Produces an RVT seq where all values in vs are assigned to the same
   Reactive r."
   [vs r]
-  {:pre [(satisfies? IReactive r)]}
+  {:pre [(reactive? r)]}
   (let [t (now)]
     (for [v vs] [r [v t]])))
 
@@ -227,7 +238,7 @@
    & {:keys [link-fn error-fn complete-fn complete-on-remove]
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)
-         (every? (partial satisfies? IReactive) (concat inputs outputs))]}
+         (every? reactive? (concat inputs outputs))]}
   {:label label
    :inputs inputs
    :outputs (wref-wrap outputs)
@@ -423,7 +434,7 @@
       :level-map level-map)))
 
 
-(defn add-links
+(defn ^:no-doc add-links
   "Conjoins links to the networks links. Returns a
   new, rebuilded network."
   [{:keys [links] :as n} new-links]
@@ -441,7 +452,7 @@
     (push! r ::completed)))
 
 
-(defn remove-links
+(defn ^:no-doc remove-links
   "Removes links matched by predicate pred and returns a new,
   rebuilded network."
   [{:keys [links] :as n} pred]
@@ -450,7 +461,7 @@
     (rebuild n links-to-remove)))
 
 
-(defn update-from-results!
+(defn ^:no-doc update-from-results!
   "Takes a network and a seq of result maps and returns an updated
   network, with links added and removed. Completes reactives
   referenced by removed links :complete-on-remove seq."
@@ -629,7 +640,7 @@
         (dissoc n :unchanged?)))))
 
 
-(defn pending-reactives
+(defn- pending-reactives
   [{:keys [rid-map]}]
   (->> rid-map keys (filter pending?)))
 
@@ -703,13 +714,15 @@
 
 
 (defn pp
-  "Pretty print network in agent."
-  [engine]
-  (let [{:keys [links rid-map]} (network engine)]
-    (println (str "Reactives\n" (s/join "\n" (->> rid-map
-                                                  keys
-                                                  (map str-react)))
-                  "\nLinks\n" (s/join "\n" (map str-link links))))))
+  "Pretty print network in engine."
+  ([]
+     (pp *engine*))
+  ([engine]
+     (let [{:keys [links rid-map]} (network engine)]
+       (println (str "Reactives\n" (s/join "\n" (->> rid-map
+                                                     keys
+                                                     (map str-react)))
+                     "\nLinks\n" (s/join "\n" (map str-link links)))))))
 
 
 (defmacro with-engine
@@ -719,48 +732,6 @@
   `(binding [reactnet.core/*engine* ~engine]
      ~@exprs))
 
-
-
-;; put this into it's own ns
-
-(defn- sleep-if-necessary
-  "Puts the current thread to sleep if the queue of pending agent
-  computations exceeds max-items."
-  [n-agent max-items millis]
-  (when (< max-items (.getQueueCount n-agent))
-    (Thread/sleep millis)))
-
-
-(defrecord AgentEngine [n-agent]
-  IEngine
-  (execute [this f args]
-    (sleep-if-necessary n-agent 1000 100)
-    (send-off n-agent (fn [n]
-                        (binding [*engine* this]
-                          (apply (partial f n) args)))))
-  (network [this]
-    @n-agent))
-
-
-(defn agent-engine
-  [network]
-  (AgentEngine. (agent network
-                       :error-handler (fn [_ ex] (.printStackTrace ex)))))
-
-
-(defrecord AtomEngine [n-atom]
-  IEngine
-  (execute [this f args]
-    (binding [*engine* this]
-      (swap! n-atom (fn [n]
-                      (apply (partial f n) args)))))
-  (network [this]
-    @n-atom))
-
-
-(defn atom-engine
-  [network]
-  (AtomEngine. (atom network)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -788,19 +759,27 @@
 
 
 (defn make-async-link-fn
-  [f result-fn]
-  (fn [{:keys [input-reactives input-rvts] :as input}]
-    (future (let [[v ex]      (safely-apply f (values input-rvts))
-                  result-map  (result-fn input v ex)]
-              ;; send changes / values to network agent
-              (when (or (seq (:add result-map)) (:remove-by result-map))
-                (execute *engine* update-from-results! [[result-map]]))
-              (doseq [[r [v t]] (:output-rvts result-map)]
-                (push! r v))))
-    nil))
+  "Takes a function and wraps it's execution in a future.
+  Any result will be pushed asynchronously to the network."
+  ([f]
+     (make-async-link-fn f make-result-map))
+  ([f result-fn]
+     (let [engine *engine*]
+       (fn [{:keys [input-reactives input-rvts] :as input}]
+         (future (let [[v ex]      (safely-apply f (values input-rvts))
+                       result-map  (result-fn input v ex)]
+                   ;; send changes / values to engine
+                   (when (or (seq (:add result-map)) (:remove-by result-map))
+                     (execute engine update-from-results! [[result-map]]))
+                   (doseq [[r [v t]] (:output-rvts result-map)]
+                     (push! r v))))
+         nil))))
 
 
 (defn make-sync-link-fn
+  "Takes a function and wraps it's execution so that exceptions are
+  caught and the return value is properly assigned to all output
+  reactives."
   ([f]
      (make-sync-link-fn f make-result-map))
   ([f result-fn]
