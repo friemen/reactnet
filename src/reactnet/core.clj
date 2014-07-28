@@ -1,14 +1,16 @@
 (ns reactnet.core
+  "Implementation of a propagation network."
   (:require [clojure.string :as s])
   (:import [java.lang.ref WeakReference]
            [java.util WeakHashMap]))
 
 ;; TODOs
+;; - Introduce arbitrary executors (future, core.async, UI thread) through
+;;   and executor protocol
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Add pause! and resume! for the engine
 ;; - Graphviz visualization of the network
-;; - Support core.async
 ;; - Support interceptor?
 
 ;; Ideas about error handling
@@ -41,14 +43,6 @@
   (deliver! [r value-timestamp-pair]
     "Sets/adds a pair of value and timestamp to r, returns true if a
   propagation of the value should be triggered."))
-
-;; Engine:
-;; Serves as abstraction of how the network is stored and
-;; propagation/updates to it are scheduled.
-
-(defprotocol IEngine
-  (execute [e f args])
-  (network [e]))
 
 ;; Link:
 ;; A map connecting input and output reactives via a function.
@@ -98,9 +92,17 @@
 ;;   :links-map           Map {rid -> Seq of links} (derived)
 
 
+;; NetworkRef:
+;; Serves as abstraction of how the network is stored and
+;; propagation/updates to it are scheduled.
+
+(defprotocol INetworkRef
+  (update [e f args])
+  (network [e]))
 
 
-(def ^:dynamic *engine* nil)
+
+(def ^:dynamic *netref* nil)
 
 ;; ---------------------------------------------------------------------------
 ;; Functions that operate on reactives.
@@ -614,7 +616,7 @@
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]
-         (push! *engine* r v t))
+         (push! *netref* r v t))
     
        (if unchanged?
          (assoc network :unchanged? true)
@@ -671,13 +673,13 @@
 
 (defn push!
   "Starts an update of a reactive and a propagation cycle using
-  the engines execute function. Returns the value."
+  the netrefs update function. Returns the value."
   ([reactive value]
-     (push! *engine* reactive value))
-  ([engine reactive value]
-     (push! engine reactive value (now)))
-  ([engine reactive value timestamp]
-     (execute engine update-and-propagate! [{reactive [value timestamp]}])
+     (push! *netref* reactive value))
+  ([netref reactive value]
+     (push! netref reactive value (now)))
+  ([netref reactive value timestamp]
+     (update netref update-and-propagate! [{reactive [value timestamp]}])
      value))
 
 
@@ -686,50 +688,50 @@
   complete-fn handler of all links that the reactive is an input
   of. Updates the network according to results of handlers."
   ([reactive]
-     (complete! *engine* reactive))
-  ([engine reactive]
-     (execute engine complete-and-propagate! [reactive])
+     (complete! *netref* reactive))
+  ([netref reactive]
+     (update netref complete-and-propagate! [reactive])
      ::completed))
 
 
 
 ;; ---------------------------------------------------------------------------
-;; Engine implementations and related functions
+;; Netref related functions
 
 
 (defn add-links!
-  "Adds links to the network using execute on the
-  networks engine. Returns the network engine."
-  [engine & links]
-  (execute engine add-links [links])
-  (execute engine update-and-propagate! [nil]))
+  "Adds links to the network using update on the
+  networks ref. Returns the network ref."
+  [netref & links]
+  (update netref add-links [links])
+  (update netref update-and-propagate! [nil]))
 
 
 (defn remove-links!
-  "Removes links from the network using execute on the
-  networks engine. Returns the network engine."
-  [engine pred]
-  (execute engine remove-links [pred])
-  (execute engine update-and-propagate! [nil]))
+  "Removes links from the network using update on the
+  networks ref. Returns the network ref."
+  [netref pred]
+  (update netref remove-links [pred])
+  (update netref update-and-propagate! [nil]))
 
 
 (defn pp
-  "Pretty print network in engine."
+  "Pretty print network in netref."
   ([]
-     (pp *engine*))
-  ([engine]
-     (let [{:keys [links rid-map]} (network engine)]
+     (pp *netref*))
+  ([netref]
+     (let [{:keys [links rid-map]} (network netref)]
        (println (str "Reactives\n" (s/join "\n" (->> rid-map
                                                      keys
                                                      (map str-react)))
                      "\nLinks\n" (s/join "\n" (map str-link links)))))))
 
 
-(defmacro with-engine
-  "Binds the given engine to the dynamic var *engine* and executes
+(defmacro with-netref
+  "Binds the given netref to the dynamic var *netref* and executes
   the expressions within that binding."
-  [engine & exprs]
-  `(binding [reactnet.core/*engine* ~engine]
+  [netref & exprs]
+  `(binding [reactnet.core/*netref* ~netref]
      ~@exprs))
 
 
@@ -764,13 +766,13 @@
   ([f]
      (make-async-link-fn f make-result-map))
   ([f result-fn]
-     (let [engine *engine*]
+     (let [netref *netref*]
        (fn [{:keys [input-reactives input-rvts] :as input}]
          (future (let [[v ex]      (safely-apply f (values input-rvts))
                        result-map  (result-fn input v ex)]
-                   ;; send changes / values to engine
+                   ;; send changes / values to netref
                    (when (or (seq (:add result-map)) (:remove-by result-map))
-                     (execute engine update-from-results! [[result-map]]))
+                     (update netref update-from-results! [[result-map]]))
                    (doseq [[r [v t]] (:output-rvts result-map)]
                      (push! r v))))
          nil))))

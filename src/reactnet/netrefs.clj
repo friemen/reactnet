@@ -1,5 +1,6 @@
-(ns reactnet.engines
-  (:require [reactnet.core :refer [IEngine *engine*]]))
+(ns reactnet.netrefs
+  "Default IEngine implementations: AtomEngine is only used for unit testing."
+  (:require [reactnet.core :refer [INetworkRef *netref*]]))
 
 ;; put this into it's own ns
 
@@ -11,36 +12,36 @@
     (Thread/sleep millis)))
 
 
-(defrecord AgentEngine [n-agent]
-  IEngine
-  (execute [this f args]
+(defrecord AgentNetref [n-agent]
+  INetworkRef
+  (update [this f args]
     (sleep-if-necessary n-agent 1000 100)
     (send-off n-agent (fn [n]
-                        (binding [*engine* this]
+                        (binding [*netref* this]
                           (apply (partial f n) args)))))
   (network [this]
     @n-agent))
 
 
-(defn agent-engine
+(defn agent-netref
   [network]
-  (AgentEngine. (agent network
+  (AgentNetref. (agent network
                        :error-handler (fn [_ ex] (.printStackTrace ex)))))
 
 
-(defrecord AtomEngine [n-atom]
-  IEngine
-  (execute [this f args]
-    (binding [*engine* this]
+(defrecord AtomNetref [n-atom]
+  INetworkRef
+  (update [this f args]
+    (binding [*netref* this]
       (swap! n-atom (fn [n]
                       (apply (partial f n) args)))))
   (network [this]
     @n-atom))
 
 
-(defn atom-engine
+(defn atom-netref
   [network]
-  (AtomEngine. (atom network)))
+  (AtomNetref. (atom network)))
 
 
 

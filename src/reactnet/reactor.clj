@@ -6,7 +6,7 @@
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
             [reactnet.core :refer :all]
-            [reactnet.engines :refer [agent-engine]])
+            [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
            [reactnet.reactives Behavior Eventstream SeqStream]))
 
@@ -23,9 +23,9 @@
 ;; EXPERIMENTAL NEW REACTOR API IMPL
 
 
-(alter-var-root #'reactnet.core/*engine*
+(alter-var-root #'reactnet.core/*netref*
                 (fn [_]
-                  (agent-engine (make-network "default" []))))
+                  (agent-netref (make-network "default" []))))
 
 (defn behavior
   ([label]
@@ -182,9 +182,9 @@
                    :else
                    (constantly f-or-ref-or-value))
         new-r      (eventstream "sample")
-        engine     *engine*
+        netref     *netref*
         task       (sched/interval scheduler millis
-                                   #(push! engine new-r (sample-fn)))]
+                                   #(push! netref new-r (sample-fn)))]
     new-r))
 
 
@@ -192,9 +192,9 @@
   [millis]
   (let [ticks  (atom 0)
         new-r  (eventstream "timer")
-        engine *engine*]
+        netref *netref*]
     (sched/interval scheduler millis millis
-                    #(push! engine new-r (swap! ticks inc)))
+                    #(push! netref new-r (swap! ticks inc)))
     new-r))
 
 
@@ -209,7 +209,7 @@
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
   (let [new-r   (factory-fn label)]
-    (add-links! *engine* (make-link label inputs [new-r]
+    (add-links! *netref* (make-link label inputs [new-r]
                                    :link-fn link-fn
                                    :complete-fn complete-fn
                                    :error-fn error-fn
@@ -230,7 +230,7 @@
                      :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
                      :output-rvts (single-value (fvalue input-rvts) new-r)}))
         links   (->> reactives (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
-    (apply (partial add-links! *engine*) links)
+    (apply (partial add-links! *netref*) links)
     new-r))
 
 
@@ -253,7 +253,7 @@
                    (assoc q :queue (conj queue x) :dequeued nil)))
         deq    (fn [{:keys [queue] :as q}]
                  (assoc q :queue [] :dequeued queue))
-        engine *engine*]
+        netref *netref*]
     (derive-new eventstream "buffer" [reactive]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
@@ -266,7 +266,7 @@
                                                 (fn []
                                                   (let [vs (:dequeued (swap! b deq))]
                                                     (when (seq vs)
-                                                      (push! engine output vs))))))))
+                                                      (push! netref output vs))))))))
                     (if (seq vs)
                       (do (some-> task deref sched/cancel)
                           (make-result-map input vs)))))
@@ -294,7 +294,7 @@
   (let [new-r   (eventstream "concat")
         state   (atom (make-reactive-queue new-r reactives))
         link    (-> (swap! state switch-reactive state) :add first)]
-    (add-links! *engine* link)
+    (add-links! *netref* link)
     new-r))
 
 
@@ -320,8 +320,8 @@
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)
                         old-t  @task
-                        engine *engine*
-                        new-t  (sched/once scheduler millis #(push! engine output v))]
+                        netref *netref*
+                        new-t  (sched/once scheduler millis #(push! netref output v))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
                     (reset! task new-t)
@@ -337,8 +337,8 @@
               (fn [{:keys [input-rvts output-reactives] :as input}]
                 (let [output (first output-reactives)
                       v      (fvalue input-rvts)
-                      engine *engine*]
-                  (sched/once scheduler millis #(push! engine output v))
+                      netref *netref*]
+                  (sched/once scheduler millis #(push! netref output v))
                   nil))))
 
 (defn every
@@ -384,7 +384,7 @@
   (let [[make-link-fn f] (unpack-fn f)
         new-r    (eventstream "mapcat'")
         state    (atom (make-reactive-queue new-r)) ]
-    (add-links! *engine* (make-link "mapcat'" [reactive] []
+    (add-links! *netref* (make-link "mapcat'" [reactive] []
                                    :link-fn
                                    (fn [{:keys [input-rvts] :as input}]
                                      (let [r (f (fvalue input-rvts))]
@@ -429,7 +429,7 @@
    :post [(reactive? %)]}
   (let [new-r   (eventstream "merge")
         links   (->> reactives (c/map #(make-link "merge" [%] [new-r])))]
-    (apply (partial add-links! *engine*) links)
+    (apply (partial add-links! *netref*) links)
     new-r))
 
 
@@ -470,7 +470,7 @@
   {:pre [(reactive? reactive)]
    :post [(reactive? %)]}
   (let [new-r (eventstream "switch")]
-    (add-links! *engine*
+    (add-links! *netref*
                 (make-link "switcher" [reactive] []
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
@@ -486,7 +486,7 @@
   {:pre [(fn-spec? f) (reactive? reactive)]
    :post [(reactive? %)]}
   (let [[make-link-fn f] (unpack-fn f)]
-    (add-links! *engine* (make-link "subscriber" [reactive] []
+    (add-links! *netref* (make-link "subscriber" [reactive] []
                                     :link-fn (make-link-fn f (constantly {}))))
     reactive))
 
@@ -502,7 +502,7 @@
    :post [(reactive? %)]}
   (let [new-r   (eventstream "take")
         c       (atom no)]
-    (add-links! *engine*
+    (add-links! *netref*
                 (make-link "take" [reactive] [new-r]
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
@@ -527,10 +527,10 @@
                                ;; TODO enqueue silently drops items, fix this
                                (swap! queue-atom enqueue v)
                                nil)))
-        engine *engine*]
+        netref *netref*]
     (sched/interval scheduler millis millis
                     #(let [vs (:dequeued (swap! queue-atom dequeue-all))]
-                       (when-not (empty? vs) (push! engine new-r (f vs)))))
+                       (when-not (empty? vs) (push! netref new-r (f vs)))))
     new-r))
 
 

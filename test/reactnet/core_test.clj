@@ -1,7 +1,7 @@
 (ns reactnet.core-test
   (:require [clojure.test :refer :all]
             [reactnet.core :as rn]
-            [reactnet.engines :as re]
+            [reactnet.netrefs :as refs]
             [reactnet.reactives])
   (:import [reactnet.reactives SeqStream Behavior Eventstream]))
 
@@ -35,7 +35,7 @@
 
 (defmacro with-network
   [links & exprs]
-  `(rn/with-engine (re/atom-engine (rn/make-network "" ~links))
+  `(rn/with-netref (refs/atom-netref (rn/make-network "" ~links))
      ~@exprs))
 
 (defn push!
@@ -47,7 +47,7 @@
                       (mapcat (fn [[r & values]]
                                 (for [v values] [r v]))))]
     (doseq [[r v] rv-pairs]
-      (rn/push! rn/*engine* r v))))
+      (rn/push! rn/*netref* r v))))
 
 
 
@@ -59,7 +59,7 @@
       (push! x 2 y 3)
       (are [rs vs] (= (mapv deref rs) vs)
            [x y z] [2 3 5])
-      (is (= 3 (-> rn/*engine* rn/network :rid-map count))))))
+      (is (= 3 (-> rn/*netref* rn/network :rid-map count))))))
 
 
 (deftest x*<x+2>-test
@@ -91,18 +91,18 @@
   (with-network []
     (let [e1 (eventstream "e1")
           e2 (eventstream "e2")]
-      (rn/add-links! rn/*engine* (rn/make-link "e1->e2" [e1] [e2]))
-      (is (= 1 (-> rn/*engine* rn/network :links count))))
+      (rn/add-links! rn/*netref* (rn/make-link "e1->e2" [e1] [e2]))
+      (is (= 1 (-> rn/*netref* rn/network :links count))))
     (System/gc)
-    (rn/execute rn/*engine* rn/update-and-propagate! [nil])
-    (is (= 0 (-> rn/*engine* rn/network :links count)))))
+    (rn/update rn/*netref* rn/update-and-propagate! [nil])
+    (is (= 0 (-> rn/*netref* rn/network :links count)))))
 
 
 (deftest cycle-test
   (let [r  (atom [])
         e1 (eventstream "e1")]
-    (rn/with-engine
-      (re/agent-engine
+    (rn/with-netref
+      (refs/agent-netref
        (rn/make-network "test" [(rn/make-link "inc-e1" [e1] [e1]
                                               :link-fn (fn [{:keys [input-rvts] :as input}]
                                                          (let [v (inc (rn/fvalue input-rvts))]
@@ -135,7 +135,7 @@
       (push! e1 :foo :bar :baz)
       (is (= [] @r))
       (is (rn/pending? e1))
-      (rn/add-links! rn/*engine* (link (partial swap! r conj) [e1] []))
+      (rn/add-links! rn/*netref* (link (partial swap! r conj) [e1] []))
       (is (= [:foo :bar :baz] @r))
       (is (not (rn/pending? e1))))))
 
@@ -183,8 +183,8 @@
                               :remove-by #(= (rn/link-outputs %) [e2])}))]
     (with-network [l1]
       (push! e1 :foo)
-      (is (= 1 (-> rn/*engine* rn/network :links count)))
-      (is (= (:label l2) (-> rn/*engine* rn/network :links first :label))))))
+      (is (= 1 (-> rn/*netref* rn/network :links count)))
+      (is (= (:label l2) (-> rn/*netref* rn/network :links first :label))))))
 
 
 (deftest dead-link-remove-test
@@ -192,7 +192,7 @@
         e2      (eventstream "e2")]
     (with-network [(link identity [e1] [e2])]
       (push! e1 ::rn/completed)
-      (is (= 0 (-> rn/*engine* rn/network :links count))))))
+      (is (= 0 (-> rn/*netref* rn/network :links count))))))
 
 
 (deftest complete-fn-test
@@ -202,8 +202,8 @@
     (with-network [(assoc (link identity [e1] [e2])
                      :complete-fn (fn [_ r] {:add [(link identity [e2] [e3])]}))]
       (push! e1 ::rn/completed)
-      (is (= 0 (->> rn/*engine* rn/network :links (filter #(= (rn/link-outputs %) [e2])) count)))
-      (is (= 1 (->> rn/*engine* rn/network :links (filter #(= (rn/link-outputs %) [e3])) count))))))
+      (is (= 0 (->> rn/*netref* rn/network :links (filter #(= (rn/link-outputs %) [e2])) count)))
+      (is (= 1 (->> rn/*netref* rn/network :links (filter #(= (rn/link-outputs %) [e3])) count))))))
 
 
 (deftest large-mult-filter-merge-test
@@ -231,9 +231,9 @@
                                                     {}))))
         values   (repeatedly 1000 #(rand-int (* distance c)))]
     (with-network links
-      (is (= 51 (-> rn/*engine* rn/network :links count)))
+      (is (= 51 (-> rn/*netref* rn/network :links count)))
       (apply push! (cons i values))
-      (is (= 51 (-> rn/*engine* rn/network :links count))))
+      (is (= 51 (-> rn/*netref* rn/network :links count))))
     (is (= values @results))))
 
 
@@ -243,8 +243,8 @@
         e3 (eventstream "e3")
         e4 (eventstream "e4")
         r  (atom [])]
-    (rn/with-engine
-      (re/agent-engine
+    (rn/with-netref
+      (refs/agent-netref
        (rn/make-network "test" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
                                               :link-fn (fn [{:keys [input-rvts] :as input}]
                                                          (let [v (reduce + (rn/values input-rvts))]
@@ -297,4 +297,4 @@
                    (link (partial swap! r conj) [e2] [])]
       (apply push! (cons e1 ranges))
       (is (= expected @r))
-      (is (= 3 (-> rn/*engine* rn/network :links count))))))
+      (is (= 3 (-> rn/*netref* rn/network :links count))))))

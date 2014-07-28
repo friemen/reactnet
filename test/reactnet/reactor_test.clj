@@ -1,7 +1,7 @@
 (ns reactnet.reactor-test
   (:require [clojure.test :refer :all]
             [reactnet.reactor :as r]
-            [reactnet.engines :as re]
+            [reactnet.netrefs :as refs]
             [reactnet.core :as rn :refer [push! complete! pp]]))
 
 
@@ -10,7 +10,7 @@
 
 (defn with-clean-network
   [f]
-  (rn/with-engine (re/agent-engine (rn/make-network "unittests" []))
+  (rn/with-netref (refs/agent-netref (rn/make-network "unittests" []))
     (f))
   (r/halt!))
 
