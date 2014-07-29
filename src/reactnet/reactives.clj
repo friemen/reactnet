@@ -78,7 +78,7 @@
 ;; ---------------------------------------------------------------------------
 ;; An IReactive implementation based on a sequence
 
-(defrecord SeqStream [seq-val-atom eventstream?]
+(defrecord Seqstream [seq-val-atom eventstream?]
   IReactive
   (last-value [this]
     (-> seq-val-atom deref :last-occ first))
@@ -94,4 +94,29 @@
                                       :last-occ [(first seq) (rn/now)]}))))
   (deliver! [r value-timestamp-pair]
     (throw (UnsupportedOperationException. "Unable to deliver a value to a seq"))))
+
+
+
+;; ---------------------------------------------------------------------------
+;; Factories
+
+(defn seqstream
+  [xs]
+  (Seqstream. (atom {:seq (seq xs)}) true))
+
+
+(defn behavior
+  [label value]
+  (Behavior. label
+             (atom [value (rn/now)])
+             (atom true)))
+
+
+(defn eventstream
+  [label]
+  (Eventstream. label
+                (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
+                       :last-value nil
+                       :completed false})
+                1000))
 

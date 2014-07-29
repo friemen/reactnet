@@ -2,30 +2,9 @@
   (:require [clojure.test :refer :all]
             [reactnet.core :as rn]
             [reactnet.netrefs :as refs]
-            [reactnet.reactives])
-  (:import [reactnet.reactives SeqStream Behavior Eventstream]))
+            [reactnet.reactives :refer [behavior eventstream seqstream]]))
 
 
-
-(defn seqstream
-  [xs]
-  (SeqStream. (atom {:seq (seq xs)}) true))
-
-
-(defn behavior
-  [label value]
-  (Behavior. label
-             (atom [value (rn/now)])
-             (atom true)))
-
-
-(defn eventstream
-  [label]
-  (Eventstream. label
-                (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
-                       :last-value nil
-                       :completed false})
-                1000))
 
 
 (defmacro link

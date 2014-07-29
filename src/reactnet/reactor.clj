@@ -8,7 +8,7 @@
             [reactnet.core :refer :all]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
-           [reactnet.reactives Behavior Eventstream SeqStream]))
+           [reactnet.reactives Behavior Eventstream Seqstream]))
 
 
 ;; TODOS
@@ -46,7 +46,7 @@
 
 (defn seqstream
   [xs]
-  (assoc (SeqStream. (atom {:seq (seq xs)
+  (assoc (Seqstream. (atom {:seq (seq xs)
                             :last-occ nil})
                      true)
     :label "seq"))
@@ -55,7 +55,7 @@
 (defn eventstream?
   [reactive]
   (or (instance? Eventstream reactive)
-      (instance? SeqStream reactive)))
+      (instance? Seqstream reactive)))
 
 
 (defn behavior?
