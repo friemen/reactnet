@@ -4,12 +4,12 @@ Consistent value propagation through a network of reactives.
 
 [![Build Status](https://travis-ci.org/friemen/reactnet.png?branch=master)](https://travis-ci.org/friemen/reactnet)
 
-
 The goal is a core for a reactive library that is designed to avoid
-inconsistencies and bouncing effects and handles infinite loops caused
-by cyclic dependencies gracefully.
+inconsistencies and bouncing effects and gracefully handles infinite
+loops caused by cyclic dependencies.
 
-It will be the core of a [reactor](https://github.com/friemen/reactor) re-implementation.
+It will be the core of a [reactor](https://github.com/friemen/reactor)
+re-implementation.
 
 ## Introduction
 
@@ -75,8 +75,9 @@ of the inputs. Any result is ignored.
                   {})))
 ```
 
-As you can see a link-function receives a map and returns a map. 
-(For details see below.)
+As you can see a link-function receives a map and returns a map, which
+in both cases is a Result map, for details see the Concepts section
+below.
 
 To make the network act dynamically with respect to the values flowing
 through it, the link-functions must also be able to add or remove
@@ -92,8 +93,8 @@ To actually create a network the following suffices:
 ```
 
 The var `n` now contains a thin wrapper around a Clojure agent. This
-is necessary to support other execution models, for example based on an
-atom (for unittesting) or on core.async channels and go-blocks.
+is necessary to support other execution models, for example based on
+an atom (for unit testing) or on core.async channels and go-blocks.
 
 Please note that an agent-based network reference executes propagation
 and updates asynchronously (on a different thread). Therefore changes
@@ -134,8 +135,8 @@ To collect updates to z we use a Clojure atom:
 (def zs (atom []))
 ```
 
-So far, none of these things is connected to a network.
-We change this by adding links that reference input and output reactives.
+So far, none of these things is connected to a network. We change
+this by adding links that reference input and output reactives.
 
 ```clojure
 (rn/add-links! n
@@ -183,10 +184,17 @@ changes to `x` cause two links to be re-evaluated (the `+` and the
 This property is critical for example in case updates to a behavior
 cause side-effects.
 
+### And now?
+
+Obviously, the API shown so far is too clumsy to be used to formulate
+complex reactive solutions. The following sections will explain how to
+use reactnet to create a nice API.
 
 ## Concepts
 
-The library is built around the following concepts:
+Before explaining how to provide functionality that is nice to use you
+will need to grasp some terminology. The following concepts form the
+foundation of this library.
 
 ### Reactive
 
@@ -226,6 +234,7 @@ A map connecting input and output reactives via a function.
   :level               The level within the reactive network
                        (max level of all input reactives + 1)
 ```
+Reactives are known to the network solely by links referencing them.
 
 ### Link function
  A function [Result -> Result] that takes a Result map containing
@@ -235,6 +244,11 @@ A map connecting input and output reactives via a function.
 ### Error handling function
  A function [Result -> Result] that takes the Result containing an
  exception. It may return a new Result map (see below) or nil.
+
+### Complete function
+ A function [Link Reactive -> Result] that is called for each input
+ reactive whose completion is detected. It may return a Result map
+ (see below) or nil.
 
 ### RVT
  A nested pair `[r [v t]]` representing a value `v` assigned to the
@@ -253,9 +267,12 @@ with the following entries
   :remove-by           A predicate that matches links to be removed
                        from the network
 ```
+This map is the vehicle for data exchange between functions attached
+to links and the propagation / update algorithm.
+
 
 ### Network
-A map containing the follwoing entries
+A map containing the following entries
 ```
   :id                  A string containing an identifier
   :links               Collection of links
@@ -263,7 +280,7 @@ A map containing the follwoing entries
   :level-map           Map {rid -> topological-level} (derived)
   :links-map           Map {rid -> Seq of links} (derived)
 ```
-The `rid` is a reactive identifier, an unique integer within a network.
+`rid` is a reactive identifier, an integer which is unique within a network.
 
 
 ### Network Reference
@@ -271,9 +288,83 @@ Serves as abstraction of how the network is stored and
 propagation/updates to it are enqueued.
 
 
+## Creating links
+
+A network is made up of links. Most FRP-style combinators are
+essentially factories that create new reactives and links them via
+specific functionality to other reactives. For any link you must
+decide
+
+* On which input and output reactives does it operate?
+* How are output values computed from input values? Put it into
+  the link function of type `[Result -> Result]`.
+* What should happen in case the link function throws an exception?
+  The answer is encoded into the error handler, again of type
+  `[Result -> Result]`.
+* What happens if one of the input reactives becomes completed? This
+  is implemented as complete function of type
+  `[Link Reactive -> Result]`.
+* Which reactives shall be set to completed when the link is removed
+  from the network?
+
+All of this information can be passed to `make-link` which in turn
+creates a Link map.
+
+Creating the three functions boils down to handling the Result map
+properly.
+
+TODO
+* Explain RVTs / getting values / returning values
+* Explain add/remove links
+* Explain how exceptions are treated
+
+
+## How it works
+
+TODO
+Give some more background
+
+
+### The propagation / network update algorithm
+
+The `propagate!` function is the heart of the algorithm, and it works
+recursively. The recursion depth depends on the topological height of
+the network. It is usually invoked in the form of `(propagate! network
+pending-links pending-reactives)`, taking three args: the network, any
+links from a prior call to it that weren't evaluated so far, and any
+reactives that are known to have pending values.
+
+Steps:
+
+* Collect links that must be evaluated because they're either pending
+  or have an input reactive that is contained in the
+  pending-reactives.
+* Of the pending links take only those that are on the minimum
+  topological level and are actually ready to be evaluated.
+* Consume all input reactive values of the links that are going to be
+  evaluated.
+* Evaluate all links on the same topological level, and collect
+  results.
+* Look for completed reactives, invoke corresponding link
+  complete-fns, and collect the results.
+* Update the network from the results, which basically means add /
+  remove links. An update causes recalculation of the topological
+  level assignment of links and reactives.
+* Push all upstream values contained in results, so they get enqueued
+  for another propagation cycle, they will not be delivered/handled in
+  this cycle.
+* Deliver downstream values contained in results to reactives and
+  recursively invoke `propagate!` for all values.
+
+After `propagate!` exits it's outermost call a loop starts that checks
+if there are still pending reactives. If yes, another propagation
+cycle is started right-away. However, it is possible that no link is
+ready to be evaluated, leading to no new results. In this case the
+loop is terminated.
+
+
 ## License
 
 Copyright 2014 F.Riemenschneider
 
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
+Distributed under the Eclipse Public License 1.0.
