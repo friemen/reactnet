@@ -306,7 +306,7 @@ propagation/updates to it are enqueued.
 ## Creating links
 
 A network is made up of links. Most FRP-style combinators are
-essentially factories that create new reactives and links them via
+essentially factories that create new reactives and link them via
 specific functionality to other reactives. For any link you must
 decide
 
