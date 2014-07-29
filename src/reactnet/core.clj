@@ -47,11 +47,11 @@
 ;; Link:
 ;; A map connecting input and output reactives via a function.
 ;;   :label               Label for pretty printing
-;;   :inputs              Input reactives, each wrapped in WeakReference
+;;   :inputs              Input reactives
 ;;   :outputs             Output reactives, each wrapped in WeakReference
-;;   :link-fn             A link function (see below) that evaluates input reactive values
-;;   :error-fn            An error handler function [result ex -> Result]
-;;   :complete-fn         A function [Link Reactive -> nil] called when one of the
+;;   :link-fn             A link function [Result -> Result] (see below)
+;;   :error-fn            An error handling function [Result -> Result] (see below)
+;;   :complete-fn         A function [Link Reactive -> Result] called when one of the
 ;;                        input reactives becomes completed
 ;;   :complete-on-remove  A seq of reactives to be completed when this link is removed
 ;;   :level               The level within the reactive network
@@ -62,7 +62,7 @@
 ;;  input values and returns a Result map or nil, which denotes that
 ;;  the function gives no clue if its invocation changed any reactive.
 
-;; Error Handler function:
+;; Error handling function:
 ;;  A function [Result -> Result] that takes the Result containing an
 ;;  exception. It may return a new Result map (see below) or nil.
 

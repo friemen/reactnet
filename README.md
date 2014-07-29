@@ -4,8 +4,6 @@ Consistent value propagation through a network of reactives.
 
 [![Build Status](https://travis-ci.org/friemen/reactnet.png?branch=master)](https://travis-ci.org/friemen/reactnet)
 
-Obviously this will limit throughput, but has the benefit of lower
-probability for so-called glitches.
 
 The goal is a core for a reactive library that is designed to avoid
 inconsistencies and bouncing effects and handles infinite loops caused
@@ -185,6 +183,92 @@ changes to `x` cause two links to be re-evaluated (the `+` and the
 This property is critical for example in case updates to a behavior
 cause side-effects.
 
+
+## Concepts
+
+The library is built around the following concepts:
+
+### Reactive
+
+A reactive is something that takes and provides values, basically an
+abstraction from classical FRP concepts *behavior* and
+*events(tream)*. The following protocol shows what the propagation
+algorithm expects:
+
+```clojure
+(defprotocol IReactive
+  (last-value [r]
+    "Returns latest value of the reactive r.")
+  (available? [r]
+    "Returns true if the reactive r would provide a value upon consume!.")
+  (pending? [r]
+    "Returns true if r contains values that wait for being consumed.")
+  (completed? [r]
+    "Returns true if the reactive r will neither accept nor return a new value.")
+  (consume! [r]
+    "Returns current value of reactive r and may turn the state into unavailable.")
+  (deliver! [r value-timestamp-pair]
+    "Sets/adds a pair of value and timestamp to r, returns true if a
+  propagation of the value should be triggered."))
+```
+
+### Link
+A map connecting input and output reactives via a function.
+```
+  :label               Label for pretty printing
+  :inputs              Input reactives
+  :outputs             Output reactives, each wrapped in WeakReference
+  :link-fn             A link function [Result -> Result] (see below)
+  :error-fn            An error handling function [Result -> Result] (see below)
+  :complete-fn         A function [Link Reactive -> Result] called when one of the
+                       input reactives becomes completed
+  :complete-on-remove  A seq of reactives to be completed when this link is removed
+  :level               The level within the reactive network
+                       (max level of all input reactives + 1)
+```
+
+### Link function
+ A function [Result -> Result] that takes a Result map containing
+ input values and returns a Result map or nil, which denotes that
+ the function gives no clue if its invocation changed any reactive.
+
+### Error handling function
+ A function [Result -> Result] that takes the Result containing an
+ exception. It may return a new Result map (see below) or nil.
+
+### RVT
+ A nested pair `[r [v t]]` representing a value `v` assigned to the
+ Reactive `r` at time `t`.
+
+### Result
+A map passed into / returned by the link-fn, error-fn and complete-fn
+with the following entries
+```
+  :input-reactives     The links input reactives
+  :output-reactives    The links output reactives
+  :input-rvts          A seq of RVTs
+  :output-rvts         A seq of RVTs
+  :exception           Exception, or nil if output-rvts is valid
+  :add                 A seq of links to be added to the network
+  :remove-by           A predicate that matches links to be removed
+                       from the network
+```
+
+### Network
+A map containing the follwoing entries
+```
+  :id                  A string containing an identifier
+  :links               Collection of links
+  :rid-map             WeakHashMap {Reactive -> rid} (derived)
+  :level-map           Map {rid -> topological-level} (derived)
+  :links-map           Map {rid -> Seq of links} (derived)
+```
+The `rid` is a reactive identifier, an unique integer within a network.
+
+
+### Network Reference
+Serves as abstraction of how the network is stored and
+propagation/updates to it are enqueued.
 
 
 ## License
