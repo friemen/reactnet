@@ -105,7 +105,7 @@
 
 
 
-(def ^:dynamic *netref* nil)
+(def ^:dynamic *netref* "A reference to a default network." nil)
 
 ;; ---------------------------------------------------------------------------
 ;; Functions that operate on reactives.
@@ -226,12 +226,13 @@
 (defn make-link
   "Creates a new Link. Label is an arbitrary text, inputs and outputs
   are sequences of reactives. 
+
+  Output reactives are kept using WeakReferences.
   
-  The link-fn is a Link function [inputs outputs -> Result] which is
-  called to produce a result from inputs (if all inputs are
-  available). Defaults to default-link-fn.
+  The link-fn is a Link function [Result -> Result] which is called to
+  produce a result from inputs-rvts. Defaults to default-link-fn.
   
-  The error-fn is a function [Link Result -> Result] which is called when
+  The error-fn is a function [Result -> Result] which is called when
   an exception was thrown by the Link function. Defaults to nil.
 
   The complete-fn is a function [Link Reactive -> Result] which is called for
@@ -377,7 +378,7 @@
                                  (cons [rid level]
                                        (mapcat (partial levels (conj visited rid) (+ level 2))
                                                (rfm-with-root rid)))))
-        level-map-wo-root    (dissoc (->> (levels #{} 0 -1)
+        level-map-wo-root    (dissoc (->> (levels #{} -1 -1)
                                           (reduce (fn [m [rid l]]
                                                     (assoc m rid (max (or (m rid) 0) l)))
                                                   {}))

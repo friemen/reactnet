@@ -26,7 +26,7 @@ For a complete overview please see the
 [example](https://github.com/friemen/reactnet/blob/master/src/reactnet/example.clj).
 
 ### Links
-A *network* is completely defined by a set of links that refer to reactives.
+A *network* is solely defined by a set of links that refer to reactives.
 
 A *reactive* is a thing that takes/returns values, *eventstreams* and
 *behaviors* are concrete implementations of the `IReactive` protocol.
@@ -37,15 +37,10 @@ called upon completion of any input reactive and some other
 settings.
 
 Defining links is the crucial part. This is what the common FRP
-combinators like `map`, `filter`, `switch` etc. are all about. They
+combinators like `map`, `filter`, `switch` etc. are all about: they
 add or remove links to a network.
 
-Here's a first example. The following function returns a new link,
-that applies a function f to values found in input reactives. The
-result of the function application is returned as value of the output
-reactives. This is - in essence - already a *function lifting*
-implementation. It takes an ordinary function and lifts it to work on
-reactives instead of plain values.
+Here's a first example. 
 
 ```clojure
 (defn apply-fn-link
@@ -59,6 +54,13 @@ reactives instead of plain values.
                         result (apply f vs)]
                     {:output-rvts (rn/broadcast-value result output-reactives)}))))
 ```
+
+The function above returns a new link, that applies a function f to
+values found in input reactives. The result of the function
+application is returned as value of the output reactives. This is - in
+essence - already a *function lifting* implementation. It takes an
+ordinary function and lifts it to work on reactives instead of plain
+values.
 
 Here's a second example, showing how a subscription to a single
 reactive is implemented. The function f is applied to the first value
@@ -104,7 +106,8 @@ updates are processed sequentially in the order they were
 enqueued. Another benefit is that the network propagation can deal
 with cycles in the dependency graph. Since links and reactives are
 ordered topologically the algorithm can sort upstream updates out and
-push them into the queue.
+push them into the queue, postponing them for a later propagation
+cycle.
 
 Although propapation is confined to one thread it is possible to use
 link-functions that work asynchronously on different threads to avoid
@@ -119,8 +122,8 @@ value. This is the main difference to *Eventstreams* which can be seen
 as sequences of value/timestamp pairs. Once a value is consumed it's
 gone.
 
-We stick to Behaviors. Here we create four of them, which are --
-despite their names -- until now totally independent of each other:
+We stick to Behaviors. Here we create four of them, which are -
+despite their names - until now totally independent of each other:
 
 ```clojure
 (def x   (rs/behavior "x" 1))
@@ -145,6 +148,10 @@ this by adding links that reference input and output reactives.
                (subscribe-link (partial swap! zs conj) z))
 ```
 
+Ignoring `zs` we just created something looking like this:
+
+![x(x+y)](images/xx+y.png)
+
 The network is now setup, we can inspect it like so ...
 
 ```clojure
@@ -155,9 +162,9 @@ The network is now setup, we can inspect it like so ...
 ;   z:3
 ;   y:2
 ; Links
-;  L3 [x y] -- clojure.core$_PLUS_@2039adf7 --> [x+y] READY
-;  L5 [x+y x] -- clojure.core$_STAR_@2acc43a8 --> [z] READY
-;  L7 [z] -- subscribe --> [] READY
+;  L2 [x y] -- clojure.core$_PLUS_@2039adf7 --> [x+y] READY
+;  L4 [x+y x] -- clojure.core$_STAR_@2acc43a8 --> [z] READY
+;  L6 [z] -- subscribe --> [] READY
 ;= nil
 ```
 
@@ -287,6 +294,14 @@ A map containing the following entries
 Serves as abstraction of how the network is stored and
 propagation/updates to it are enqueued.
 
+```clojure
+(defprotocol INetworkRef
+  (update [netref f args]
+    "Apply f to the current network state (as first arg) and the
+    arguments given in the args vector.")
+  (network [netref]
+    "Return the network state."))
+```
 
 ## Creating links
 
@@ -297,13 +312,13 @@ decide
 
 * On which input and output reactives does it operate?
 * How are output values computed from input values? Put it into
-  the link function of type `[Result -> Result]`.
+  the link function of type [Result -> Result].
 * What should happen in case the link function throws an exception?
   The answer is encoded into the error handler, again of type
-  `[Result -> Result]`.
+  [Result -> Result].
 * What happens if one of the input reactives becomes completed? This
   is implemented as complete function of type
-  `[Link Reactive -> Result]`.
+  [Link Reactive -> Result].
 * Which reactives shall be set to completed when the link is removed
   from the network?
 
@@ -321,8 +336,12 @@ TODO
 
 ## How it works
 
-TODO
-Give some more background
+TODO Give some more background on
+
+* Topological levels
+* WeakReferences for outputs
+* Automatic link removal / completion
+* Backpressure
 
 
 ### The propagation / network update algorithm
@@ -348,7 +367,7 @@ Steps:
 * Look for completed reactives, invoke corresponding link
   complete-fns, and collect the results.
 * Update the network from the results, which basically means add /
-  remove links. An update causes recalculation of the topological
+  remove links. An update causes re-calculation of the topological
   level assignment of links and reactives.
 * Push all upstream values contained in results, so they get enqueued
   for another propagation cycle, they will not be delivered/handled in
@@ -356,11 +375,11 @@ Steps:
 * Deliver downstream values contained in results to reactives and
   recursively invoke `propagate!` for all values.
 
-After `propagate!` exits it's outermost call a loop starts that checks
-if there are still pending reactives. If yes, another propagation
-cycle is started right-away. However, it is possible that no link is
-ready to be evaluated, leading to no new results. In this case the
-loop is terminated.
+After `propagate!` exits the outermost invocation a loop starts that
+checks if there are still pending reactives. If yes, another
+propagation cycle is started right-away. However, it is possible that
+no link is ready to be evaluated, leading to no new results. In this
+case the loop is terminated.
 
 
 ## License
