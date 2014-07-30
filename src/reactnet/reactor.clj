@@ -1,6 +1,8 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay filter into merge map mapcat reduce remove some take])
+  (:refer-clojure :exclude [concat count delay drop drop-while
+                            filter into merge map mapcat
+                            reduce remove some swap! take take-while])
   (:require [clojure.core :as c]
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
@@ -91,6 +93,11 @@
   (doseq [r rs]
     (rn/complete! r)))
 
+
+(defn reset-network!
+  []
+  (remove-links! *netref* (constantly true)))
+
 ;; ---------------------------------------------------------------------------
 ;; Enqueuing reactives and switching bewteen them
 
@@ -114,7 +121,7 @@
         :add [(make-link "temp" [r] [output]
                          :complete-fn
                          (fn [_ r]
-                           (c/merge (swap! q-atom switch-reactive q-atom)
+                           (c/merge (c/swap! q-atom switch-reactive q-atom)
                                     {:remove-by #(= [r] (link-inputs %))})))])
       queue-state)))
 
@@ -124,6 +131,31 @@
   (switch-reactive (update-in queue-state [:queue] conj r) q-atom))
 
 
+;; ---------------------------------------------------------------------------
+;; Misc internal utils
+
+(defn- countdown
+  "Returns a function that accepts any args and return n times true,
+  and then forever false."
+  [n]
+  (let [c (atom n)]
+    (fn [& args]
+      (<= 0 (c/swap! c dec)))))
+
+
+(defn- sample-fn
+  "If passed a function returns it wrapped in an exception handler.
+  If passed a IDeref (atom, agent, behavior, ...) returns a function that derefs it.
+  If passed any other value return a function that always returns it."
+  [f-or-ref-or-value]
+  (cond
+   (fn? f-or-ref-or-value) #(try (f-or-ref-or-value)
+                                 (catch Exception ex
+                                   (do (.printStackTrace ex)
+                                       ;; TODO what to push in case f fails?
+                                       ex)))
+   (instance? clojure.lang.IDeref f-or-ref-or-value) #(deref f-or-ref-or-value)
+   :else (constantly f-or-ref-or-value)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -176,21 +208,6 @@
   (seqstream [x]))
 
 
-(defn- sample-fn
-  "If passed a function returns it wrapped in an exception handler.
-  If passed a IDeref (atom, agent, behavior, ...) returns a function that derefs it.
-  If passed any other value return a function that always returns it."
-  [f-or-ref-or-value]
-  (cond
-   (fn? f-or-ref-or-value) #(try (f-or-ref-or-value)
-                                 (catch Exception ex
-                                   (do (.printStackTrace ex)
-                                       ;; TODO what to push in case f fails?
-                                       ex)))
-   (instance? clojure.lang.IDeref f-or-ref-or-value) #(deref f-or-ref-or-value)
-   :else (constantly f-or-ref-or-value)))
-
-
 (defn sample
   [millis f-or-ref-or-value]
   (let [f          (sample-fn f-or-ref-or-value)
@@ -207,7 +224,7 @@
         new-r  (eventstream "timer")
         netref *netref*]
     (sched/interval scheduler millis millis
-                    #(rn/push! netref new-r (swap! ticks inc)))
+                    #(rn/push! netref new-r (c/swap! ticks inc)))
     new-r))
 
 
@@ -272,12 +289,12 @@
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output         (first output-reactives)
                         {vs :dequeued
-                         queue :queue} (swap! b enq (fvalue input-rvts))]
+                         queue :queue} (c/swap! b enq (fvalue input-rvts))]
                     (when (and (= 1 (c/count queue)) (> millis 0))
-                      (swap! task (fn [_]
+                      (c/swap! task (fn [_]
                                     (sched/once scheduler millis
                                                 (fn []
-                                                  (let [vs (:dequeued (swap! b deq))]
+                                                  (let [vs (:dequeued (c/swap! b deq))]
                                                     (when (seq vs)
                                                       (rn/push! netref output vs))))))))
                     (if (seq vs)
@@ -321,7 +338,7 @@
    :post [(reactive? %)]}
   (let [new-r   (eventstream "concat")
         state   (atom (make-reactive-queue new-r reactives))
-        link    (-> (swap! state switch-reactive state) :add first)]
+        link    (-> (c/swap! state switch-reactive state) :add first)]
     (add-links! *netref* link)
     new-r))
 
@@ -334,7 +351,7 @@
     (derive-new eventstream "count" [reactive]
                 :link-fn
                 (fn [{:keys [input-rvts] :as input}]
-                  (make-result-map input (swap! c inc))))))
+                  (make-result-map input (c/swap! c inc))))))
 
 
 (defn debounce
@@ -358,7 +375,7 @@
 
 (defn delay
   [millis reactive]
-  {:pre [(number? millis) (reactive? reactive)]
+  {:pre [(pos? millis) (reactive? reactive)]
    :post [(reactive? %)]}
   (derive-new eventstream "delay" [reactive]
               :link-fn
@@ -368,6 +385,23 @@
                       netref *netref*]
                   (sched/once scheduler millis #(rn/push! netref output v))
                   nil))))
+
+(defn drop-while
+  [pred reactive]
+  (derive-new eventstream "drop" [reactive]
+              :link-fn
+              (fn [{:keys [input-rvts] :as input}]
+                (if (apply pred (values input-rvts))
+                  {}
+                  (make-result-map input (fvalue input-rvts))))))
+
+
+(defn drop
+  [no reactive]
+  {:pre [(pos? no) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (drop-while (countdown no) reactive))
+
 
 (defn every
   ([reactive]
@@ -426,7 +460,7 @@
                                    :link-fn
                                    (fn [{:keys [input-rvts] :as input}]
                                      (let [r (f (fvalue input-rvts))]
-                                       (swap! state enqueue-reactive state r)))
+                                       (c/swap! state enqueue-reactive state r)))
                                    :complete-on-remove [new-r]))
     new-r))
 
@@ -479,7 +513,7 @@
         accu             (atom initial-value)]
     (derive-new eventstream "reduce" [reactive]
                 :link-fn
-                (make-link-fn (fn [v] (swap! accu f v))
+                (make-link-fn (fn [v] (c/swap! accu f v))
                               (constantly {}))
                 :complete-fn
                 (fn [l r]
@@ -494,7 +528,7 @@
         accu             (atom initial-value)]
     (derive-new eventstream "scan" [reactive]
                 :link-fn
-                (make-link-fn (fn [v] (swap! accu f v))
+                (make-link-fn (fn [v] (c/swap! accu f v))
                               make-result-map))))
 
 
@@ -538,33 +572,34 @@
     reactive))
 
 
-(defn swap-conj!
-  [a reactive]
-  (subscribe (partial swap! a conj) reactive))
+(defn swap!
+  [a f reactive]
+  (subscribe (partial c/swap! a f) reactive))
+
+
+(defn take-while
+  [pred reactive]
+  {:pre [(fn-spec? pred) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (derive-new eventstream "take" [reactive]
+              :link-fn
+              (fn [{:keys [input-rvts output-reactives] :as input}]
+                (if (apply pred (values input-rvts))
+                  {:output-rvts (single-value (fvalue input-rvts) (first output-reactives))}
+                  {:no-consume true
+                   :remove-by #(= (link-outputs %) output-reactives)}))))
 
 
 (defn take
   [no reactive]
-  {:pre [(number? no) (reactive? reactive)]
+  {:pre [(pos? no) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream "take")
-        c       (atom no)]
-    (add-links! *netref*
-                (make-link "take" [reactive] [new-r]
-                           :link-fn
-                           (fn [{:keys [input-rvts] :as input}]
-                             (let [r (make-result-map input (fvalue input-rvts))]
-                               (if (>= 0 (swap! c dec))
-                                 (assoc r
-                                   :remove-by #(= (link-outputs %) [new-r]))
-                                 r)))
-                           :complete-on-remove [new-r]))
-    new-r))
+  (take-while (countdown no) reactive))
 
 
 (defn throttle
   [f millis max-queue-size reactive]
-  {:pre [(fn-spec? f) (number? millis) (number? max-queue-size) (reactive? reactive)]
+  {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? reactive)]
    :post [(reactive? %)]}
   (let [queue-atom (atom (make-queue max-queue-size))
         new-r  (derive-new eventstream "throttle" [reactive]
@@ -572,11 +607,11 @@
                            (fn [{:keys [input-rvts] :as input}]
                              (let [v (fvalue input-rvts)]
                                ;; TODO enqueue silently drops items, fix this
-                               (swap! queue-atom enqueue v)
+                               (c/swap! queue-atom enqueue v)
                                nil)))
         netref *netref*]
     (sched/interval scheduler millis millis
-                    #(let [vs (:dequeued (swap! queue-atom dequeue-all))]
+                    #(let [vs (:dequeued (c/swap! queue-atom dequeue-all))]
                        (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
     new-r))
 
@@ -626,7 +661,7 @@
                                    (let [[test-value
                                           expr-value] (->> args
                                                            (partition 2)
-                                                           (drop-while (comp not first))
+                                                           (c/drop-while (comp not first))
                                                            first)]
                                      expr-value)))))
 

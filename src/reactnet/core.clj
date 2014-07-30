@@ -5,6 +5,8 @@
            [java.util WeakHashMap]))
 
 ;; TODOs
+;; - To support take-while we need on IReactive level a next-value function!
+;;   Get next values, eval links, decide if they are consumed or not!
 ;; - Introduce arbitrary executors (future, core.async, UI thread) through
 ;;   and executor protocol
 ;; - Preserve somehow the timestamp when applying a link function:
@@ -30,16 +32,19 @@
 ;; Serves as abstraction of event streams and behaviors.
 
 (defprotocol IReactive
-  (last-value [r]
-    "Returns latest value of the reactive r.")
+  (next-value [r]
+    "Returns the next value-timestamp pair of the reactive r without
+    consuming it.")
   (available? [r]
-    "Returns true if the reactive r would provide a value upon consume!.")
+    "Returns true if the reactive r would provide a value upon
+    consume!.")
   (pending? [r]
     "Returns true if r contains values that wait for being consumed.")
   (completed? [r]
     "Returns true if the reactive r will neither accept nor return a new value.")
   (consume! [r]
-    "Returns current value of reactive r and may turn the state into unavailable.")
+    "Returns the next value-timestamp pair of the reactive r and may
+    turn the state into unavailable.")
   (deliver! [r value-timestamp-pair]
     "Sets/adds a pair of value and timestamp to r, returns true if a
   propagation of the value should be triggered."))
@@ -77,6 +82,7 @@
 ;;   :output-reactives    The links output reactives
 ;;   :input-rvts          A seq of RVTs
 ;;   :output-rvts         A seq of RVTs
+;;   :no-consume          Signals that the input values must not get consumed
 ;;   :exception           Exception, or nil if output-rvts is valid
 ;;   :add                 A seq of links to be added to the network
 ;;   :remove-by           A predicate that matches links to be removed
@@ -269,7 +275,7 @@
 
 (defn ^:no-doc str-react
   [r]
-  (str (if (completed? r) "C " "  ") (:label r) ":" (pr-str (last-value r))))
+  (str (if (completed? r) "C " "  ") (:label r) ":" (pr-str (next-value r))))
 
 (declare dead?)
 
@@ -524,8 +530,7 @@
         result        (try (link-fn input)
                            (catch Exception ex {:exception ex}))
         error-result  (handle-exception! link (merge input result))]
-    (if result
-      (merge input result error-result))))
+    (merge input result error-result)))
 
 
 (defn- eval-complete-fns!
@@ -541,6 +546,16 @@
                                  (map (juxt identity :complete-fn))) :when f]
                    (f l r))]
     (remove nil? results)))
+
+
+(defn- next-values
+  "Peeks all values from reactives, without consuming them. 
+  Returns a map {Reactive -> [value timestamp]}."
+  [reactives]
+  (reduce (fn [rvt-map r]
+            (assoc rvt-map r (next-value r)))
+          {}
+          reactives))
 
 
 (defn- consume-values!
@@ -597,11 +612,14 @@
            rvt-map         (->> current-links
                                 (mapcat link-inputs)
                                 distinct
-                                consume-values!)
+                                next-values)
            _               (dump-values "INPUTS" rvt-map)
            link-results    (->> current-links
-                                (map (partial eval-link! rvt-map))
-                                (remove nil?))
+                                (map (partial eval-link! rvt-map)))
+           _               (->> link-results
+                                (remove :no-consume)
+                                (mapcat :input-reactives)
+                                set (map consume!) doall)
            compl-results   (eval-complete-fns! network)
            results         (concat link-results compl-results)
            unchanged?      (empty? results)

@@ -214,16 +214,19 @@ algorithm expects:
 
 ```clojure
 (defprotocol IReactive
-  (last-value [r]
-    "Returns latest value of the reactive r.")
+  (next-value [r]
+    "Returns the next value-timestamp pair of the reactive r without
+    consuming it.")
   (available? [r]
-    "Returns true if the reactive r would provide a value upon consume!.")
+    "Returns true if the reactive r would provide a value upon
+    consume!.")
   (pending? [r]
     "Returns true if r contains values that wait for being consumed.")
   (completed? [r]
     "Returns true if the reactive r will neither accept nor return a new value.")
   (consume! [r]
-    "Returns current value of reactive r and may turn the state into unavailable.")
+    "Returns the next value-timestamp pair of the reactive r and may
+    turn the state into unavailable.")
   (deliver! [r value-timestamp-pair]
     "Sets/adds a pair of value and timestamp to r, returns true if a
   propagation of the value should be triggered."))
@@ -271,6 +274,8 @@ with the following entries
   :output-reactives    The links output reactives
   :input-rvts          A seq of RVTs
   :output-rvts         A seq of RVTs
+  :no-consume          Signals that the input values must not get
+                       consumed
   :exception           Exception, or nil if output-rvts is valid
   :add                 A seq of links to be added to the network
   :remove-by           A predicate that matches links to be removed
@@ -362,10 +367,12 @@ Steps:
   pending-reactives.
 * Of the pending links take only those that are on the minimum
   topological level and are actually ready to be evaluated.
-* Consume all input reactive values of the links that are going to be
-  evaluated.
+* Get next values from input reactive of the links that are going to
+  be evaluated.
 * Evaluate all links on the same topological level, and collect
   results.
+* Consume all values unless a `:no-consume` entry is found in a
+  result.
 * Look for completed reactives, invoke corresponding link
   complete-fns, and collect the results.
 * Update the network from the results, which basically means add /

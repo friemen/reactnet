@@ -9,8 +9,8 @@
 
 (defrecord Behavior [label a new?]
   IReactive
-  (last-value [this]
-    (first @a))
+  (next-value [this]
+    @a)
   (available? [r]
     true)
   (pending? [r]
@@ -40,10 +40,10 @@
 
 (defrecord Eventstream [label a n]
   IReactive
-  (last-value [this]
-    (-> a deref :last-occ first))
+  (next-value [this]
+    (-> a deref :queue first))
   (available? [this]
-    (seq (:queue @a)))
+    (->> a deref :queue seq))
   (pending? [this]
     (rn/available? this))
   (completed? [this]
@@ -80,8 +80,8 @@
 
 (defrecord Seqstream [seq-val-atom eventstream?]
   IReactive
-  (last-value [this]
-    (-> seq-val-atom deref :last-occ first))
+  (next-value [this]
+    (-> seq-val-atom deref :seq first (vector (rn/now))))
   (available? [this]
     (-> seq-val-atom deref :seq seq))
   (pending? [this]
