@@ -11,6 +11,8 @@ loops caused by cyclic dependencies.
 It will be the core of a [reactor](https://github.com/friemen/reactor)
 re-implementation.
 
+[API docs](https://friemen.github.com/reactnet)
+
 ## Introduction
 
 This library is a low-level tool for creating combinators that follow

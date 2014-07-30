@@ -560,7 +560,7 @@
   (doseq [[r vt] rvt-map]
     (when-not (completed? r)
       (deliver! r vt)))
-  (map first rvt-map))
+  (->> rvt-map (map first) (filter pending?)))
 
 
 (declare propagate-downstream!)

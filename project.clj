@@ -7,5 +7,6 @@
   :plugins [[codox "0.8.10"]]
   :codox {:defaults {:doc/format :markdown}
           :sources ["src"]
+          :exclude [reactnet.example]
           :src-dir-uri "https://github.com/friemen/reactnet/blob/master/"
           :src-linenum-anchor-prefix "L"})

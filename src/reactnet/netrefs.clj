@@ -1,5 +1,5 @@
 (ns reactnet.netrefs
-  "Default IEngine implementations: AtomEngine is only used for unit testing."
+  "Default INetworkRef implementations."
   (:require [reactnet.core :refer [INetworkRef *netref*]]))
 
 ;; put this into it's own ns
@@ -24,6 +24,7 @@
 
 
 (defn agent-netref
+  "Wraps and returns the network in an agent based NetworkRef."
   [network]
   (AgentNetref. (agent network
                        :error-handler (fn [_ ex] (.printStackTrace ex)))))
@@ -40,6 +41,8 @@
 
 
 (defn atom-netref
+  "Wraps and returns the network in an atom based NetworkRef. Only
+  used for unit testing."
   [network]
   (AtomNetref. (atom network)))
 

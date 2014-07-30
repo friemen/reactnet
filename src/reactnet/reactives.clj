@@ -1,5 +1,5 @@
 (ns reactnet.reactives
-  "Default IReactive implementations: Behavior, Eventstream and Seqstream"
+  "Default IReactive implementations: Behavior, Eventstream and Seqstream."
   (:require [reactnet.core :as rn])
   (:import [reactnet.core IReactive]))
 

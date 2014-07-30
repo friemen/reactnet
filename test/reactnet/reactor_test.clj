@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [reactnet.reactor :as r]
             [reactnet.netrefs :as refs]
+            [reactnet.scheduler :as sched]
             [reactnet.core :as rn :refer [push! complete! pp]]))
 
 
@@ -12,7 +13,7 @@
   [f]
   (rn/with-netref (refs/agent-netref (rn/make-network "unittests" []))
     (f))
-  (r/halt!))
+  (sched/cancel-all r/scheduler))
 
 (use-fixtures :each with-clean-network)
 
@@ -136,6 +137,14 @@
       (complete! e1)
       (wait)
       (is (= [[42 43 44] [45] [46]] @r)))))
+
+
+(deftest changes-test
+  (let [r   (atom [])
+        b   (r/behavior "b" nil)
+        c   (->> b r/changes (r/swap-conj! r))]
+    (push-and-wait! b 1 b 1 b 42)
+    (is (= [[nil 1] [1 42]] @r))))
 
 
 (deftest concat-test

@@ -16,7 +16,8 @@
 ;; - Implement unsubscribe
 ;; - Implement proper error handling
 ;; - Implement execution-modes (sync, async, future)
-;; - Implement expression lifting
+;; - Implement sample-once
+;; - Implement changes (create eventstream from behavior)
 
 
 ;; ===========================================================================
@@ -152,13 +153,10 @@
 
 
 ;; ---------------------------------------------------------------------------
-(defonce scheduler (sched/scheduler 5))
 
+(defonce ^{:doc "A single scheduler."}
+  scheduler (sched/scheduler 5))
 
-(defn halt!
-  "Cancel all scheduled tasks."
-  []
-  (sched/cancel-all scheduler))
 
 ;; ---------------------------------------------------------------------------
 ;; More constructors of reactives
@@ -285,6 +283,21 @@
 (defn buffer-c
   [no reactive]
   (buffer no -1 reactive))
+
+
+(defn changes
+  [behavior]
+  {:pre [(behavior? behavior)]
+   :post [(eventstream? %)]}
+  (let [last-value (atom @behavior)]
+    (derive-new eventstream "changes" [behavior]
+                :link-fn (fn [{:keys [input-rvts output-reactives]}]
+                           (let [old @last-value
+                                 new (fvalue input-rvts)]
+                             (reset! last-value new)
+                             (if (not= old new)
+                               {:output-rvts (single-value [old new] (first output-reactives))}
+                               {}))))))
 
 
 (defn concat

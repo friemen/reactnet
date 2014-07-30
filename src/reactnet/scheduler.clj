@@ -1,5 +1,6 @@
 (ns reactnet.scheduler
-  "Thin wrapper around ScheduledThreadPoolExecutor"
+  "Scheduling functions, which are only a thin wrapper around JDKs
+  ScheduledThreadPoolExecutor."
   (:import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit]))
 
 
@@ -26,7 +27,7 @@
 
 
 (defn tasks
-  "Returns a vector of all active/queued tasks."
+  "Returns a vector of all active/pending tasks."
   [s]
   (-> s .getQueue vec))
 
