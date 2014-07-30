@@ -292,6 +292,15 @@
     (is (= [1 3 6 10] @r))))
 
 
+(deftest snapshot-test
+  (let [r   (atom [])
+        b   (r/behavior "source" 42)
+        e1  (r/eventstream "e1")
+        c   (->> e1 (r/snapshot b) (r/swap-conj! r))]
+    (push-and-wait! e1 1 b 43 e1 2 e1 3)
+    (is (= [42 43 43] @r))))
+
+
 (deftest switch-test
   (let [r   (atom [])
         e1  (r/eventstream "e1")

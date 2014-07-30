@@ -1,11 +1,11 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay filter merge map mapcat reduce remove some take])
+  (:refer-clojure :exclude [concat count delay filter into merge map mapcat reduce remove some take])
   (:require [clojure.core :as c]
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
-            [reactnet.core :refer :all]
+            [reactnet.core :as rn :refer :all :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
            [reactnet.reactives Behavior Eventstream Seqstream]))
@@ -81,6 +81,16 @@
       (and (map? f) (instance? clojure.lang.IFn (:async f)))))
 
 
+(defn push!
+  [& rvs]
+  (doseq [[r v] (partition 2 rvs)]
+    (rn/push! r v)))
+
+(defn complete!
+  [& rs]
+  (doseq [r rs]
+    (rn/complete! r)))
+
 ;; ---------------------------------------------------------------------------
 ;; Enqueuing reactives and switching bewteen them
 
@@ -119,7 +129,7 @@
 ;; ---------------------------------------------------------------------------
 ;; Queue to be used with an atom or agent
 
-(defn make-queue
+(defn- make-queue
   [max-size]
   {:queue (PersistentQueue/EMPTY)
    :dequeued []
@@ -166,23 +176,28 @@
   (seqstream [x]))
 
 
+(defn- sample-fn
+  "If passed a function returns it wrapped in an exception handler.
+  If passed a IDeref (atom, agent, behavior, ...) returns a function that derefs it.
+  If passed any other value return a function that always returns it."
+  [f-or-ref-or-value]
+  (cond
+   (fn? f-or-ref-or-value) #(try (f-or-ref-or-value)
+                                 (catch Exception ex
+                                   (do (.printStackTrace ex)
+                                       ;; TODO what to push in case f fails?
+                                       ex)))
+   (instance? clojure.lang.IDeref f-or-ref-or-value) #(deref f-or-ref-or-value)
+   :else (constantly f-or-ref-or-value)))
+
+
 (defn sample
   [millis f-or-ref-or-value]
-  (let [sample-fn (cond
-                   (fn? f-or-ref-or-value)
-                   #(try (f-or-ref-or-value)
-                         (catch Exception ex
-                           (do (.printStackTrace ex)
-                               ;; TODO what to push in case f fails?
-                               ex)))
-                   (instance? clojure.lang.IRef f-or-ref-or-value)
-                   #(deref f-or-ref-or-value)
-                   :else
-                   (constantly f-or-ref-or-value))
+  (let [f          (sample-fn f-or-ref-or-value)
         new-r      (eventstream "sample")
         netref     *netref*
         task       (sched/interval scheduler millis
-                                   #(push! netref new-r (sample-fn)))]
+                                   #(rn/push! netref new-r (f)))]
     new-r))
 
 
@@ -192,7 +207,7 @@
         new-r  (eventstream "timer")
         netref *netref*]
     (sched/interval scheduler millis millis
-                    #(push! netref new-r (swap! ticks inc)))
+                    #(rn/push! netref new-r (swap! ticks inc)))
     new-r))
 
 
@@ -264,7 +279,7 @@
                                                 (fn []
                                                   (let [vs (:dequeued (swap! b deq))]
                                                     (when (seq vs)
-                                                      (push! netref output vs))))))))
+                                                      (rn/push! netref output vs))))))))
                     (if (seq vs)
                       (do (some-> task deref sched/cancel)
                           (make-result-map input vs)))))
@@ -334,7 +349,7 @@
                         v      (fvalue input-rvts)
                         old-t  @task
                         netref *netref*
-                        new-t  (sched/once scheduler millis #(push! netref output v))]
+                        new-t  (sched/once scheduler millis #(rn/push! netref output v))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
                     (reset! task new-t)
@@ -351,7 +366,7 @@
                 (let [output (first output-reactives)
                       v      (fvalue input-rvts)
                       netref *netref*]
-                  (sched/once scheduler millis #(push! netref output v))
+                  (sched/once scheduler millis #(rn/push! netref output v))
                   nil))))
 
 (defn every
@@ -377,7 +392,17 @@
 
 (defn hold
   [reactive]
+  {:pre [(reactive? reactive)]
+   :post [(behavior? %)]}
   (derive-new behavior "hold" [reactive]))
+
+
+(defn into
+  [behavior reactive]
+  {:pre [(behavior? behavior) (reactive? reactive)]
+   :post [(behavior? %)]}
+  (add-links! *netref* (make-link "into" [reactive] [behavior]))
+  behavior)
 
 
 (defn map
@@ -494,6 +519,15 @@
     new-r))
 
 
+(defn snapshot
+  [f-or-ref-or-value reactive]
+  (let [f (sample-fn f-or-ref-or-value)]
+    (derive-new eventstream "snapshot" [reactive]
+                :link-fn
+                (fn [{:keys [output-reactives]}]
+                  {:output-rvts (single-value (f) (first output-reactives))}))))
+
+
 (defn subscribe
   [f reactive]
   {:pre [(fn-spec? f) (reactive? reactive)]
@@ -543,7 +577,7 @@
         netref *netref*]
     (sched/interval scheduler millis millis
                     #(let [vs (:dequeued (swap! queue-atom dequeue-all))]
-                       (when-not (empty? vs) (push! netref new-r (f vs)))))
+                       (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
     new-r))
 
 
@@ -636,7 +670,7 @@
 
 (defmethod lift* 'let
   [[_ bindings & exprs]]
-  `(let ~(into []
+  `(let ~(c/into []
                (c/mapcat (fn [[sym expr]]
                            [sym `(lift ~expr)])
                          (partition 2 bindings)))
