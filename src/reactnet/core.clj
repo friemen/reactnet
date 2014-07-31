@@ -5,8 +5,6 @@
            [java.util WeakHashMap]))
 
 ;; TODOs
-;; - To support take-while we need on IReactive level a next-value function!
-;;   Get next values, eval links, decide if they are consumed or not!
 ;; - Introduce arbitrary executors (future, core.async, UI thread) through
 ;;   and executor protocol
 ;; - Preserve somehow the timestamp when applying a link function:
@@ -616,13 +614,13 @@
            _               (dump-values "INPUTS" rvt-map)
            link-results    (->> current-links
                                 (map (partial eval-link! rvt-map)))
-           _               (->> link-results
+           consumed-rvts   (->> link-results
                                 (remove :no-consume)
                                 (mapcat :input-reactives)
                                 set (map consume!) doall)
            compl-results   (eval-complete-fns! network)
            results         (concat link-results compl-results)
-           unchanged?      (empty? results)
+           unchanged?      (->> results (remove :no-consume) empty?)
            
            ;; apply network changes returned by link and complete functions
            network         (update-from-results! network results)

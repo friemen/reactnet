@@ -1,6 +1,6 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay drop drop-while
+  (:refer-clojure :exclude [concat count delay drop drop-while drop-last
                             filter into merge map mapcat
                             reduce remove some swap! take take-while])
   (:require [clojure.core :as c]
@@ -18,9 +18,12 @@
 ;; - Implement unsubscribe
 ;; - Implement proper error handling
 ;; - Implement execution-modes (sync, async, future)
-;; - Implement sample-once
-;; - Implement changes (create eventstream from behavior)
-
+;; - Implement once
+;; - Implement distinct
+;; - Implement empty
+;; - Implement remove
+;; - Implement repeat
+;; - Is cycle useful?
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL
@@ -170,11 +173,13 @@
 
 (defn- enqueue
   [{:keys [queue dequeued max-size] :as q} v]
-  (assoc q :queue
-         (conj (if (>= (c/count queue) max-size)
-                 (pop queue)
-                 queue)
-               v)))
+  (if (>= (c/count queue) max-size)
+    (assoc q
+      :queue (conj (pop queue) v)
+      :dequeued [(first queue)])
+    (assoc q
+      :queue (conj queue v)
+      :dequeued [])))
 
 
 (defn- dequeue
@@ -386,6 +391,7 @@
                   (sched/once scheduler millis #(rn/push! netref output v))
                   nil))))
 
+
 (defn drop-while
   [pred reactive]
   (derive-new eventstream "drop" [reactive]
@@ -402,6 +408,19 @@
    :post [(reactive? %)]}
   (drop-while (countdown no) reactive))
 
+
+(defn drop-last
+  [no reactive]
+  {:pre [(pos? no) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (let [q (atom (make-queue no))]
+    (derive-new eventstream "drop-last" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts output-reactives]}]
+                  (let [vs (:dequeued (c/swap! q enqueue (fvalue input-rvts)))]
+                    (if (seq vs)
+                      {:output-rvts (single-value (first vs) (first output-reactives))}
+                      {}))))))
 
 (defn every
   ([reactive]
@@ -601,17 +620,16 @@
   [f millis max-queue-size reactive]
   {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [queue-atom (atom (make-queue max-queue-size))
-        new-r  (derive-new eventstream "throttle" [reactive]
+  (let [q     (atom (make-queue max-queue-size))
+        new-r (derive-new eventstream "throttle" [reactive]
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
-                             (let [v (fvalue input-rvts)]
-                               ;; TODO enqueue silently drops items, fix this
-                               (c/swap! queue-atom enqueue v)
-                               nil)))
+                             (if (>= (-> q deref :queue c/count) max-queue-size)
+                               {:no-consume true}
+                               (c/swap! q enqueue (fvalue input-rvts)))))
         netref *netref*]
     (sched/interval scheduler millis millis
-                    #(let [vs (:dequeued (c/swap! queue-atom dequeue-all))]
+                    #(let [vs (:dequeued (c/swap! q dequeue-all))]
                        (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
     new-r))
 

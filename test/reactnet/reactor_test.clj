@@ -26,6 +26,7 @@
 (defn push-and-wait!
   [& rvs]
   (doseq [[r v] (partition 2 rvs)]
+    (assert (rn/reactive? r))
     (push! r v))
   (wait))
 
@@ -204,6 +205,17 @@
     (is (rn/completed? c))))
 
 
+(deftest drop-last-test
+  (let [r   (atom [])
+        e1  (r/eventstream "e1")
+        c   (->> e1 (r/drop-last 2) (r/swap! r conj))]
+    (apply push-and-wait! (interleave (repeat e1) (range 6)))
+    (is (= [0 1 2 3] @r))
+    (push-and-wait! e1 6 e1 ::rn/completed)
+    (is (= [0 1 2 3 4] @r))
+    (is (rn/completed? c))))
+
+
 (deftest drop-while-test
   (let [r   (atom [])
         e1  (r/eventstream "e1")
@@ -350,13 +362,26 @@
 
 
 (deftest throttle-test
-  (let [r   (atom [])
-        e1  (r/eventstream "e1")
-        c   (->> e1 (r/throttle last 500 10) (r/swap! r conj))]
-    (push-and-wait! e1 :foo e1 :bar e1 :baz)
-    (is (= [] @r))
-    (wait 500)
-    (is (= [:baz] @r))))
+  (testing "Sending all at once"
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 (r/throttle identity 500 10) (r/swap! r conj))]
+      (push-and-wait! e1 :foo e1 :bar e1 :baz)
+      (is (= [] @r))
+      (is (not (rn/pending? e1)))
+      (wait 500)
+      (is (= [[:foo :bar :baz]] @r))))
+  (testing "Too many items for the throttle queue to hold"
+    (let [r   (atom [])
+          e1  (r/eventstream "e1")
+          c   (->> e1 (r/throttle identity 300 5) (r/swap! r conj))]
+      (apply push-and-wait! (interleave (repeat e1) (range 7)))
+      (is (= [] @r))
+      (is (rn/pending? e1))
+      (wait 200)
+      (is (= [[0 1 2 3 4]] @r))
+      (wait 400)
+      (is (= [[0 1 2 3 4] [5 6]] @r)))))
 
 
 ;; ---------------------------------------------------------------------------
