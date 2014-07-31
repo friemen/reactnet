@@ -62,8 +62,7 @@
 
 ;; Link function:
 ;;  A function [Result -> Result] that takes a Result map containing
-;;  input values and returns a Result map or nil, which denotes that
-;;  the function gives no clue if its invocation changed any reactive.
+;;  input values and returns a Result map or nil.
 
 ;; Error handling function:
 ;;  A function [Result -> Result] that takes the Result containing an

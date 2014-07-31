@@ -103,7 +103,7 @@ an atom (for unit testing) or on core.async channels and go-blocks.
 Please note that an agent-based network reference executes propagation
 and updates asynchronously (on a different thread). Therefore changes
 do not become immediately visible on the thread that triggered an
-update. The benefit is more consistency, as alls propagations and
+update. The benefit is more consistency, because all propagations and
 updates are processed sequentially in the order they were
 enqueued. Another benefit is that the network propagation can deal
 with cycles in the dependency graph. Since links and reactives are
@@ -119,13 +119,12 @@ consistency and responsiveness at the granularity of specific links.
 
 
 Let's define some reactives. *Behaviors* are time-varying values, in
-other words variables that can be observed. They always have a
-value. This is the main difference to *Eventstreams* which can be seen
-as sequences of value/timestamp pairs. Once a value is consumed it's
-gone.
+other words: variables. They always have a value. This is the main
+difference to *Eventstreams* which can be seen as sequences of
+value/timestamp pairs. Once a value is consumed it's gone.
 
-We stick to Behaviors. Here we create four of them, which are -
-despite their names - until now totally independent of each other:
+We stick to Behaviors. Here we create four of them, which are not
+connected to any network and independent of each other:
 
 ```clojure
 (def x   (rs/behavior "x" 1))
@@ -150,11 +149,11 @@ this by adding links that reference input and output reactives.
                (subscribe-link (partial swap! zs conj) z))
 ```
 
-Ignoring `zs` we just created something looking like this:
+Ignoring `zs` we just created a network looking like this:
 
 ![x(x+y)](images/xx+y.png)
 
-The network is now setup, we can inspect it like so ...
+We can inspect it using `(pp netref)` ...
 
 ```clojure
 (rn/pp n)
@@ -196,7 +195,7 @@ cause side-effects.
 ### And now?
 
 Obviously, the API shown so far is too clumsy to be used to formulate
-complex reactive solutions. Instead, want to be able to write
+complex reactive solutions. Instead, we want to be able to write
 expressions like
 
 ```clojure
@@ -278,17 +277,16 @@ are able to provide a next value.
 
 A link is *dead* when at least one input reactive is completed, or all
 output reactives are completed or nil. An empty outputs seq does not
-count in.
+count as "all completed or nil".
 
 
 ### Link function
  A function [Result -> Result] that takes a Result map containing
- input values and returns a Result map or nil, which denotes that
- the function gives no clue if its invocation changed any reactive.
+ input values and returns a Result map or nil.
 
 ### Error handling function
  A function [Result -> Result] that takes the Result containing an
- exception. It may return a new Result map (see below) or nil.
+ `:exception` entry. It may return a new Result map (see below) or nil.
 
 ### Complete function
  A function [Link Reactive -> Result] that is called for each input
@@ -315,8 +313,8 @@ with the following entries
                        be removed from the network
 ```
 
-This map is the vehicle for data exchange between functions attached
-to links and the propagation / update algorithm.
+This map is the primary means for data exchange between functions
+attached to links and the propagation / update algorithm.
 
 
 ### Network
@@ -444,10 +442,11 @@ If the link function throws an exception or returns a Result with an
 `:exception` entry the error handler is invoked with the `:exception`
 entry.
 
-The error handler can add exactly the same entries as the link
-function. After the error handler has been invoked the `:exception`
-entry has no further effect. Alternatively it can schedule a task or
-push values via the network refs `update` function.
+The error handler can use the same entries as the link function. After
+the error handler has been invoked the `:exception` entry has no
+further effect. Instead of directly returning values the error handler
+can schedule a task or push values via the network refs `update`
+function.
 
 
 ### Complete function
@@ -477,35 +476,35 @@ TODO Give some more background on
 ### The propagation / network update algorithm
 
 The `propagate!` function is the heart of the algorithm, and it works
-recursively. The recursion depth depends on the topological height of
-the network. It is usually invoked in the form of `(propagate! network
-pending-links pending-reactives)`, taking three args: the network, any
-links from a prior call to it that weren't evaluated so far, and any
-reactives that are known to have pending values.
+recursively. The maximum recursion depth corresponds to the
+topological height of the network. It is usually invoked in the form
+of `(propagate! network pending-links pending-reactives)`. The arguments are:
+* the network,
+* any links from a prior call to it that weren't evaluated so far
+* and any reactives that are known to have pending values.
 
 Steps:
 
-* Collect links that must be evaluated because they're either pending
-  or have an input reactive that is contained in the
-  pending-reactives.
-* Of the pending links take only those that are on the minimum
-  topological level and are actually ready to be evaluated.
-* Get next values from input reactive of the links that are going to
-  be evaluated.
-* Evaluate all links on the same topological level, and collect
-  results.
-* Consume all values unless a `:no-consume` entry is found in a
-  result.
-* Look for completed reactives, invoke corresponding link
-  complete-fns, and collect the results.
-* Update the network from the results, which basically means add /
-  remove links. An update causes re-calculation of the topological
-  level assignment of links and reactives.
-* Push all upstream values contained in results, so they get enqueued
-  for another propagation cycle, they will not be delivered/handled in
-  this cycle.
-* Deliver downstream values contained in results to reactives and
-  recursively invoke `propagate!` for all values.
+1. Collect links that must be evaluated because they're either pending
+   or have an input reactive that is contained in the
+   pending-reactives.
+2. Of the pending links take only those that are on the minimum
+   topological level and are actually ready to be evaluated.
+3. Get next values from input reactive of the links that are going to
+   be evaluated.
+4. Evaluate all links on the same topological level, and collect
+   results.
+5. Consume all values unless a `:no-consume` entry is found in result.
+6. Look for completed reactives, invoke corresponding link
+   complete-fns, and collect the results.
+7. Update the network from the results, which basically means add /
+   remove links. An update causes re-calculation of the topological
+   level assignment of links and reactives.
+8. Push all upstream values contained in results, so they get enqueued
+   for another propagation cycle, they will not be delivered/handled in
+   this cycle.
+9. Deliver downstream values contained in results to reactives and
+   recursively invoke `propagate!` for all values.
 
 After `propagate!` exits the outermost invocation a loop starts that
 checks if there are still pending reactives. If yes, another
