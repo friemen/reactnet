@@ -1,8 +1,8 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay drop drop-while drop-last
-                            filter into merge map mapcat
-                            reduce remove some swap! take take-while])
+  (:refer-clojure :exclude [concat count delay distinct drop drop-while drop-last
+                            filter into merge map mapcat reduce remove some
+                            swap! take take-last take-while])
   (:require [clojure.core :as c]
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
@@ -392,6 +392,18 @@
                   nil))))
 
 
+(defn distinct
+  [reactive]
+  (let [vs (atom #{})]
+    (derive-new eventstream "distinct" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts output-reactives] :as input}]
+                  (let [v (fvalue input-rvts)]
+                    (when-not (@vs v)
+                      (c/swap! vs conj v)
+                      {:output-rvts (single-value v (first output-reactives))}))))))
+
+
 (defn drop-while
   [pred reactive]
   (derive-new eventstream "drop" [reactive]
@@ -614,6 +626,21 @@
   {:pre [(pos? no) (reactive? reactive)]
    :post [(reactive? %)]}
   (take-while (countdown no) reactive))
+
+
+(defn take-last
+  [no reactive]
+  {:pre [(pos? no) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (let [q (atom (make-queue no))]
+    (derive-new eventstream "take-last" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts]}]
+                  (c/swap! q enqueue (fvalue input-rvts)))
+                :complete-fn
+                (fn [l r]
+                  {:output-rvts (enqueue-values (-> q deref :queue)
+                                                (-> l link-outputs first))}))))
 
 
 (defn throttle

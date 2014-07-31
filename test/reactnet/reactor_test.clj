@@ -193,6 +193,14 @@
     (is (= [:foo] @r))))
 
 
+(deftest distinct-test
+  (let [r   (atom [])
+        e1  (r/eventstream "e1")
+        c   (->> e1 r/distinct (r/swap! r conj))]
+    (push-and-wait! e1 :foo e1 :bar e1 :foo e1 :baz e1 :bar)
+    (is (= [:foo :bar :baz] @r))))
+
+
 (deftest drop-test
   (let [r   (atom [])
         e1  (r/eventstream "e1")
@@ -351,6 +359,17 @@
     (is (= [:foo :bar] @r))
     (is (rn/completed? c))
     (is (rn/pending? e1))))
+
+
+(deftest take-last-test
+  (let [r   (atom [])
+        e1  (r/eventstream "e1")
+        c   (->> e1 (r/take-last 3) (r/swap! r conj))]
+    (apply push-and-wait! (interleave (repeat e1) (range 5)))
+    (is (= [] @r))
+    (complete! e1)
+    (wait)
+    (is (= [2 3 4] @r))))
 
 
 (deftest take-while-test
