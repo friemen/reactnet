@@ -121,12 +121,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Functions to deal with RVTs
-
-(defn ^:no-doc now
-  "Returns the current epoch time in milliseconds."
-  []
-  (System/currentTimeMillis))
+;; Functions to extract values from RVTs
 
 
 (defn value
@@ -147,12 +142,22 @@
   (mapv value rvts))
 
 
+;; ---------------------------------------------------------------------------
+;; Functions to produce RVT seqs
+
+
+(defn ^:no-doc now
+  "Returns the current epoch time in milliseconds."
+  []
+  (System/currentTimeMillis))
+
+
 (defn single-value
   "Produces a sequence with exactly one RVT pair assigned to Reactive
   r."
-  ([v r]
-     {:pre [(reactive? r)]}
-     [[r [v (now)]]]))
+  [v r]
+  {:pre [(reactive? r)]}
+  [[r [v (now)]]])
 
 
 (defn broadcast-value

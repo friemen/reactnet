@@ -196,8 +196,35 @@ cause side-effects.
 ### And now?
 
 Obviously, the API shown so far is too clumsy to be used to formulate
-complex reactive solutions. The following sections will explain how to
-use reactnet to create a nice API.
+complex reactive solutions. Instead, want to be able to write
+expressions like
+
+```clojure
+(->> mouse
+     (r/filter (fn [{:keys [trigger]}]
+                 (= :clicked trigger)))
+     (r/map vector things)
+     (r/map react)
+     (r/into things))
+```
+
+Here's how a `map` as used above could be implemented:
+
+```clojure
+(defn map
+  [f & reactives]
+  (let [new-r (eventstream "map")]
+    (add-links! *netref* (make-link "map" reactives []
+                                    :link-fn
+                                    (fn [{:keys [input-rvts]}]
+                                      (let [v (apply f (values input-rvts))]
+                                        {:output-rvts (single-value v new-r)}))
+                                    :complete-on-remove [new-r]))))
+```
+
+The following sections will explain how to use reactnet to create
+functions like these.
+
 
 ## Concepts
 
@@ -209,8 +236,8 @@ foundation of this library.
 
 A reactive is something that takes and provides values, basically an
 abstraction from classical FRP concepts *behavior* and
-*events(tream)*. The following protocol shows what the propagation
-algorithm expects:
+*events(tream)*. The following protocol shows the functions that the
+propagation algorithm interacts with:
 
 ```clojure
 (defprotocol IReactive
@@ -243,10 +270,16 @@ A map connecting input and output reactives via a function.
   :complete-fn         A function [Link Reactive -> Result] called when one of the
                        input reactives becomes completed
   :complete-on-remove  A seq of reactives to be completed when this link is removed
-  :level               The level within the reactive network
-                       (max level of all input reactives + 1)
 ```
 Reactives are known to the network solely by links referencing them.
+
+A link is *ready* when all input reactives are available, i.e. they
+are able to provide a next value.
+
+A link is *dead* when at least one input reactive is completed, or all
+output reactives are completed or nil. An empty outputs seq does not
+count in.
+
 
 ### Link function
  A function [Result -> Result] that takes a Result map containing
@@ -274,13 +307,14 @@ with the following entries
   :output-reactives    The links output reactives
   :input-rvts          A seq of RVTs
   :output-rvts         A seq of RVTs
-  :no-consume          Signals that the input values must not get
-                       consumed
+  :no-consume          True if the preceding link evaluation
+                       does not cause consumption of the input
   :exception           Exception, or nil if output-rvts is valid
   :add                 A seq of links to be added to the network
-  :remove-by           A predicate that matches links to be removed
-                       from the network
+  :remove-by           An unary predicate that matches links to
+                       be removed from the network
 ```
+
 This map is the vehicle for data exchange between functions attached
 to links and the propagation / update algorithm.
 
@@ -329,16 +363,105 @@ decide
 * Which reactives shall be set to completed when the link is removed
   from the network?
 
-All of this information can be passed to `make-link` which in turn
-creates a Link map.
+All of this information can be passed to
+`(make-link label inputs outputs & {:keys [link-fn error-fn complete-fn complete-on-remove]})`
+which in turn creates a Link map.
+
+A link connects input with output reactives, consequently you pass
+these to the `make-link` function.
+
+In addition you can specify which reactives shall be completed when
+this link is removed from network by listing them in the value for
+`:complete-on-remove`.  Since links are automatically removed when
+they are considered dead this will lead to automatic completion.
+
 
 Creating the three functions boils down to handling the Result map
 properly.
 
-TODO
-* Explain RVTs / getting values / returning values
-* Explain add/remove links
-* Explain how exceptions are treated
+### Link function
+
+The link function is called in a propagation cycle if the link is
+ready and the topological level of the cycle matches the links level.
+
+Upon invocation the link function will receive the following entries
+in a map:
+
+```
+  :input-reactives     The links input reactives
+  :output-reactives    The links output reactives
+  :input-rvts          A seq of RVTs
+```
+
+To extract values from the RVT seq `:input-rvts` there are two
+helpers:
+* `(fvalue rvts)` returns the value of the first RVT from a seq of RVTs.
+* `(values rvts)` returns a seq of values from a seq of RVTs.
+
+
+The link function can add the following entries
+
+```
+  :output-rvts         A seq of RVTs that will get delivered 
+  :no-consume          True if the preceding link evaluation
+                       does not cause consumption of the input
+  :exception           Exception, or nil if output-rvts is valid
+  :add                 A seq of links to be added to the network
+  :remove-by           An unary predicate that matches links to be
+                       removed from the network
+```
+
+Essentially the link function tells the algorithm
+* which values to deliver to other reactives (`:output-rvts`),
+* which new links to add to the network (`:add`),
+* which links to remove from the network (`:remove-by`).
+
+To help produce the `:output-rvts` value there are four
+functions for convenience:
+* `(single-value v r)` produces a seq with one RVT using the current
+  time as timestamp.
+* `(broadcast-value v rs)` produces a seq of RVTs, one for each
+  reactive in rs, each with the same value and timestamp.
+* `(zip-values vs rs)` produces a seq of RVTs, where reactives and
+  values are position-wise combined.
+* `(enqueue-values vs r)` produces a seq of RVTs, all containing the
+  same reactive r where each RVT carries on of the values of vs.
+
+
+The `:no-consume` entry helps to avoid unwanted consumption of
+values. Before invoking the link function the algorithm asks for new
+values by invoking `next-value` on each input reactive. Only after
+evaluation the values are actually consumed by invoking `consume!` on
+each reactive. The value of a reactive is NOT consumed if all links
+depending on it return a truthy value for `:no-consume`. This
+enables link functions to reject a value after they examined it,
+`take-while` is a good example where this is required.
+
+
+### Error handler
+
+If the link function throws an exception or returns a Result with an
+`:exception` entry the error handler is invoked with the `:exception`
+entry.
+
+The error handler can add exactly the same entries as the link
+function. After the error handler has been invoked the `:exception`
+entry has no further effect. Alternatively it can schedule a task or
+push values via the network refs `update` function.
+
+
+### Complete function
+
+The complete function is invoked whenever the completion of an input
+reactive is detected. It is supposed to return a Result map where it
+can set one of the following entries:
+
+```
+  :output-rvts         A seq of RVTs
+  :add                 A seq of links to be added to the network
+  :remove-by           An unary predicate that matches links to be
+                       removed from the network
+```
 
 
 ## How it works
