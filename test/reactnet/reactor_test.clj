@@ -34,6 +34,32 @@
 ;; ---------------------------------------------------------------------------
 ;; Tests of special reactive factories
 
+
+(deftest fnbehavior-seqstream-test
+  (let [r       (atom [])
+        seconds (r/fnbehavior #(long (/ (System/currentTimeMillis) 1000)))
+        numbers (r/seqstream (range 10))
+        c       (->> (r/map vector seconds numbers) (r/swap! r conj))]
+    (wait)
+    (is (= (range 10) (->> r deref (map second))))))
+
+
+(deftest just-test
+  (testing "Just one value"
+    (let [r  (atom [])
+          j  (r/just 42)]
+      (is (rn/pending? j))
+      (r/swap! r conj j)
+      (wait)
+      (is (= [42] @r))
+      (is (rn/completed? j))))
+  (testing "A function invocation"
+    (let [r  (atom [])
+          e  (->> (constantly :foo) r/just (r/swap! r conj))]
+      (wait)
+      (is (= [:foo] @r)))))
+
+
 (deftest sample-test
   (testing "Sample constant value"
     (let [r   (atom [])
@@ -63,16 +89,6 @@
         t   (->> (r/timer 200) (r/swap! r conj))]
     (wait 1000)
     (is (= [1 2 3 4] (take 4 @r)))))
-
-
-(deftest just-test
-  (let [r  (atom [])
-        j  (r/just 42)]
-    (is (rn/pending? j))
-    (r/swap! r conj j)
-    (wait)
-    (is (= [42] @r))
-    (is (rn/completed? j))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -267,6 +283,15 @@
     (is (= [1 3 5 7 9] @r))))
 
 
+(deftest into-test
+  (let [e  (r/eventstream "e")
+        b1 (r/behavior "b1")
+        b2 (r/behavior "b2")]
+    (->> e (r/into b1 b2))
+    (push-and-wait! e 1)
+    (is (and (= @b1 1) (= @b2 1)))))
+
+
 (deftest map-test
   (testing "Two eventstreams"
     (let [r   (atom [])
@@ -321,6 +346,16 @@
     (complete! e1)
     (wait)
     (is (= [10] @r))))
+
+
+(deftest remove-test
+  (let [r        (atom [])
+        values   (range 10)
+        expected (remove odd? values)
+        e1       (r/eventstream "e1")
+        c        (->> e1 (r/remove odd?) (r/swap! r conj))]
+    (apply push-and-wait! (interleave (repeat e1) values))
+    (is (= [0 2 4 6 8] @r))))
 
 
 (deftest scan-test

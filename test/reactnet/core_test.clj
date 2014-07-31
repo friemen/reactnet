@@ -5,6 +5,8 @@
             [reactnet.reactives :refer [behavior eventstream seqstream]]))
 
 
+;; ---------------------------------------------------------------------------
+;; Supportive functions
 
 
 (defmacro link
@@ -29,6 +31,8 @@
       (rn/push! rn/*netref* r v))))
 
 
+;; ---------------------------------------------------------------------------
+;; Unit tests
 
 (deftest z=x+y-test
   (let [x (behavior "x" 1)
@@ -75,6 +79,26 @@
     (System/gc)
     (rn/update rn/*netref* rn/update-and-propagate! [nil])
     (is (= 0 (-> rn/*netref* rn/network :links count)))))
+
+
+(deftest no-consume-test
+  (let [e1        (eventstream "e1")
+        e2        (eventstream "e2")
+        consume?  (atom false)
+        r         (atom [])]
+    (with-network [(rn/make-link "forward" [e1] [e2]
+                                 :link-fn
+                                 (fn [{:keys [input-rvts]}]
+                                   (if @consume?
+                                     {:output-rvts (rn/single-value (rn/fvalue input-rvts) e2)}
+                                     {:no-consume true})))
+                   (link (partial swap! r conj) [e2] [])]
+      (push! e1 1)
+      (is (rn/pending? e1))
+      (is (= [] @r))
+      (reset! consume? true)
+      (push! e1 2)
+      (is (= [1 2] @r)))))
 
 
 (deftest cycle-test

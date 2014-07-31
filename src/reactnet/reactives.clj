@@ -76,7 +76,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; An IReactive implementation based on a sequence
+;; An IReactive eventstream-like implementation based on a sequence
 
 (defrecord Seqstream [seq-val-atom eventstream?]
   IReactive
@@ -93,17 +93,37 @@
                                      {:seq (next seq)
                                       :last-occ [(first seq) (rn/now)]}))))
   (deliver! [r value-timestamp-pair]
-    (throw (UnsupportedOperationException. "Unable to deliver a value to a seq"))))
+    (throw (UnsupportedOperationException. "Unable to deliver a value to a seq")))
+  clojure.lang.IDeref
+  (deref [this]
+    (-> seq-val-atom deref :seq first)))
 
 
 
 ;; ---------------------------------------------------------------------------
+;; An IReactive behavior-like implementation based on a function
+
+(defrecord Fnbehavior [f]
+  IReactive
+  (next-value [this]
+    [(f) (rn/now)])
+  (available? [this]
+    true)
+  (pending? [this]
+    false)
+  (completed? [this]
+    false)
+  (consume! [this]
+    nil)                                ;TODO
+  (deliver! [r value-timestamp-pair]
+    (throw (UnsupportedOperationException. "Unable to deliver a value to a function")))
+  clojure.lang.IDeref
+  (deref [this]
+    (f)))
+
+
+;; ---------------------------------------------------------------------------
 ;; Factories
-
-(defn seqstream
-  [xs]
-  (Seqstream. (atom {:seq (seq xs)}) true))
-
 
 (defn behavior
   [label value]
@@ -120,3 +140,12 @@
                        :completed false})
                 1000))
 
+
+(defn seqstream
+  [xs]
+  (Seqstream. (atom {:seq (seq xs)}) true))
+
+
+(defn fnbehavior
+  [f]
+  (Fnbehavior. f))

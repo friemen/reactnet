@@ -10,18 +10,16 @@
             [reactnet.core :as rn :refer :all :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
-           [reactnet.reactives Behavior Eventstream Seqstream]))
+           [reactnet.reactives Behavior Eventstream Seqstream Fnbehavior]))
 
 
 ;; TODOS
 ;; - How to prevent scheduled tasks from accumulating?
+;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 ;; - Implement unsubscribe
 ;; - Implement proper error handling
 ;; - Implement execution-modes (sync, async, future)
-;; - Implement once
-;; - Implement distinct
 ;; - Implement empty
-;; - Implement remove
 ;; - Implement repeat
 ;; - Is cycle useful?
 
@@ -32,6 +30,13 @@
 (alter-var-root #'reactnet.core/*netref*
                 (fn [_]
                   (agent-netref (make-network "default" []))))
+
+(defonce ^{:doc "A single scheduler."}
+  scheduler (sched/scheduler 5))
+
+
+;; ---------------------------------------------------------------------------
+;; Factories / Predicates
 
 (defn behavior
   ([label]
@@ -50,12 +55,6 @@
                        :completed false})
                 1000))
 
-(defn seqstream
-  [xs]
-  (assoc (Seqstream. (atom {:seq (seq xs)
-                            :last-occ nil})
-                     true)
-    :label "seq"))
 
 
 (defn eventstream?
@@ -67,6 +66,33 @@
 (defn behavior?
   [reactive]
   (instance? Behavior reactive))
+
+
+;; ---------------------------------------------------------------------------
+;; Push! Complete! Reset
+
+(defn push!
+  [& rvs]
+  (doseq [[r v] (partition 2 rvs)]
+    (assert (reactive? r))
+    (rn/push! r v)))
+
+
+(defn complete!
+  [& rs]
+  (doseq [r rs]
+    (rn/complete! r)))
+
+
+(defn reset-network!
+  []
+  (sched/cancel-all scheduler)
+  (remove-links! *netref* (constantly true)))
+
+
+;; ---------------------------------------------------------------------------
+;; Wrapping of functions
+
 
 (defn async
   [f]
@@ -85,21 +111,13 @@
   (or (instance? clojure.lang.IFn f)
       (and (map? f) (instance? clojure.lang.IFn (:async f)))))
 
-
-(defn push!
-  [& rvs]
-  (doseq [[r v] (partition 2 rvs)]
-    (rn/push! r v)))
-
-(defn complete!
-  [& rs]
-  (doseq [r rs]
-    (rn/complete! r)))
+;; How to define link functions?
+#_ (def b (rmap {:f foobar
+                 :link-fn-factory [sync, future, go]
+                 :result-fn (fn [])
+                 :error-fn (fn []) }))
 
 
-(defn reset-network!
-  []
-  (remove-links! *netref* (constantly true)))
 
 ;; ---------------------------------------------------------------------------
 ;; Enqueuing reactives and switching bewteen them
@@ -161,6 +179,22 @@
    :else (constantly f-or-ref-or-value)))
 
 
+(defn- derive-new
+  "Creates, links and returns a new reactive which will complete if
+  the link to it is removed."
+  [factory-fn label inputs
+   & {:keys [link-fn complete-fn error-fn]
+      :or {link-fn default-link-fn}}]
+  {:pre [(seq inputs)]}
+  (let [new-r (factory-fn label)]
+    (add-links! *netref* (make-link label inputs [new-r]
+                                    :link-fn link-fn
+                                    :complete-fn complete-fn
+                                    :error-fn error-fn
+                                    :complete-on-remove [new-r]))
+    new-r))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Queue to be used with an atom or agent
 
@@ -200,17 +234,19 @@
 
 
 ;; ---------------------------------------------------------------------------
-
-(defonce ^{:doc "A single scheduler."}
-  scheduler (sched/scheduler 5))
-
-
-;; ---------------------------------------------------------------------------
 ;; More constructors of reactives
+
+
+(defn fnbehavior
+  [f]
+  (assoc (Fnbehavior. f)
+    :label (str f)))
+
+(declare seqstream)
 
 (defn just
   [x]
-  (seqstream [x]))
+  (seqstream [((sample-fn x))]))
 
 
 (defn sample
@@ -221,6 +257,14 @@
         task       (sched/interval scheduler millis
                                    #(rn/push! netref new-r (f)))]
     new-r))
+
+
+(defn seqstream
+  [xs]
+  (assoc (Seqstream. (atom {:seq (seq xs)
+                            :last-occ nil})
+                     true)
+    :label "seq"))
 
 
 (defn timer
@@ -237,19 +281,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Some combinators
 
-
-(defn- derive-new
-  [factory-fn label inputs
-   & {:keys [link-fn complete-fn error-fn]
-      :or {link-fn default-link-fn}}]
-  {:pre [(seq inputs)]}
-  (let [new-r   (factory-fn label)]
-    (add-links! *netref* (make-link label inputs [new-r]
-                                   :link-fn link-fn
-                                   :complete-fn complete-fn
-                                   :error-fn error-fn
-                                   :complete-on-remove [new-r]))
-    new-r))
 
 (declare match)
 
@@ -463,11 +494,11 @@
 
 
 (defn into
-  [behavior reactive]
-  {:pre [(behavior? behavior) (reactive? reactive)]
-   :post [(behavior? %)]}
-  (add-links! *netref* (make-link "into" [reactive] [behavior]))
-  behavior)
+  [ & reactives]
+  {:pre [(< 1 (c/count reactives)) (every? reactive? reactives)]
+   :post [(reactive? %)]}
+  (add-links! *netref* (make-link "into" [(last reactives)] (c/drop-last reactives)))
+  (first reactives))
 
 
 (defn map
@@ -549,6 +580,14 @@
                 :complete-fn
                 (fn [l r]
                   {:output-rvts (single-value @accu (-> l link-outputs first))}))))
+
+
+(defn remove
+  [pred reactive]
+  (filter (if (map? pred)
+            (update-in pred [:f] complement)
+            (complement pred))
+          reactive))
 
 
 (defn scan
@@ -659,14 +698,6 @@
                     #(let [vs (:dequeued (c/swap! q dequeue-all))]
                        (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
     new-r))
-
-
-
-;; Howto define link functions succinctly?
-#_ (def b (rmap {:f foobar
-                 :link-fn-factory [sync, future, go]
-                 :result-fn (fn [])
-                 :error-fn (fn []) }))
 
 
 
