@@ -93,7 +93,9 @@
 ;;                        rid = reactive id (derived)
 ;;   :level-map           Map {rid -> topological-level} (derived)
 ;;   :links-map           Map {rid -> Seq of links} (derived)
-
+;;   :pending-completions A seq of reactives that will receive ::completed
+;;   :dont-complete       Map {Reactive -> c} of reactives that are not
+;;                        automatically completed as long as c > 0
 
 ;; NetworkRef:
 ;; Serves as abstraction of how the network is stored and
@@ -269,7 +271,9 @@
 (defn make-network
   "Returns a new network."
   [id links]
-  (rebuild {:id id} links))
+  (rebuild {:id id
+            :dont-complete {}}
+           links))
 
 
 ;; ---------------------------------------------------------------------------
@@ -448,39 +452,52 @@
       :level-map level-map)))
 
 
-(defn ^:no-doc add-links
-  "Conjoins links to the networks links. Returns a
-  new, rebuilded network."
-  [{:keys [links] :as n} new-links]
-  (rebuild n (concat links new-links)))
-
-
 (declare push!)
 
-(defn- complete-for-links!
+
+(defn- complete-pending
   "Asynchronously completes all reactives contained in
-  the :complete-on-remove seq of the given links."
-  [links]
-  (doseq [r (->> links
-                 (mapcat :complete-on-remove))]
-    (push! r ::completed)))
+  the :pending-completion set of the network n. Excludes reactives
+  contained in the :dont-complete map. Returns an updated network."
+  [{:keys [pending-completions dont-complete] :as n}]
+  (doseq [r (->> n :pending-completions
+                 (remove dont-complete))]
+    (push! r ::completed))
+  (assoc n
+    :pending-completions
+    (->> n :pending-completions
+         (filter dont-complete)
+         set)))
 
 
-(defn ^:no-doc remove-links
-  "Removes links matched by predicate pred and returns a new,
-  rebuilded network."
-  [{:keys [links] :as n} pred]
-  (let [links-to-remove (remove pred links)]
-    (complete-for-links! links-to-remove)
-    (rebuild n links-to-remove)))
+(defn ^:no-doc update-links
+  "Removes links specified by the predicate or set and conjoins links
+  to the networks links. Returns a new, rebuilded network."
+  [{:keys [links] :as n} remove-by-pred new-links]
+  (let [links-to-remove (filter remove-by-pred links)
+        remaining-links (remove remove-by-pred links)]
+    (when (seq links-to-remove)
+                   (dump-links "REMOVE" links-to-remove))
+    (when (seq new-links)
+                   (dump-links "ADD" new-links))
+    (-> n
+        (assoc :pending-completions (->> links-to-remove
+                                         (mapcat :complete-on-remove)))
+        (rebuild (concat remaining-links new-links))
+        complete-pending)))
 
 
 (defn ^:no-doc update-from-results!
   "Takes a network and a seq of result maps and returns an updated
   network, with links added and removed. Completes reactives
   referenced by removed links :complete-on-remove seq."
-  [{:keys [links] :as n} results]
-  (let [links-to-remove (->> results
+  [{:keys [links dont-complete] :as n} results]
+  (let [dont-complete   (->> results
+                             (mapcat :prevent-completion)
+                             (reduce (fn [m r]
+                                       (assoc m r (or (some-> r m inc) 1)))
+                                     dont-complete))
+        links-to-remove (->> results
                              (map :remove-by)
                              (remove nil?)
                              (cons dead?)
@@ -490,19 +507,9 @@
                                             (into ls)))
                                      #{}))
         links-to-add    (->> results (mapcat :add) set)]
-    (complete-for-links! links-to-remove)
-    (if (or (seq links-to-add) (seq links-to-remove))
-      
-      (do (when (seq links-to-remove)
-            (dump-links "REMOVE" links-to-remove))
-          (when (seq links-to-add)
-            (dump-links "ADD" links-to-add))
-          
-          (->> n :links
-               (remove links-to-remove)
-               (concat links-to-add)
-               (rebuild n)))
-      n)))
+    (-> n
+        (assoc :dont-complete dont-complete)
+        (update-links links-to-remove links-to-add))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -576,7 +583,9 @@
   [rvt-map]
   (doseq [[r vt] rvt-map]
     (when-not (completed? r)
-      (deliver! r vt)))
+      (deliver! r vt))
+    (when (completed? r)
+      (dump "WARNING: trying to deliver into completed" r)))
   (->> rvt-map (map first) (filter pending?)))
 
 
@@ -628,6 +637,7 @@
            
            ;; apply network changes returned by link and complete functions
            network         (update-from-results! network results)
+           
            all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
            upstream?       (fn [[r _]]
@@ -641,7 +651,6 @@
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]
          (push! *netref* r v t))
-    
        (if unchanged?
          (assoc network :unchanged? true)
          (propagate-downstream! network
@@ -653,7 +662,7 @@
   "Propagate values to reactives that are guaranteed to be downstream."
   [network pending-links downstream-rvts]
   (loop [n network
-         rvts downstream-rvts] 
+         rvts downstream-rvts]
     (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
                                           (if (rvm r)
                                             [rvm (conj remaining [r vt])]
@@ -671,19 +680,32 @@
   (->> rid-map keys (filter pending?)))
 
 
+(defn- allow-completion
+  [{:keys [dont-complete] :as n} rvt-map]
+  (->> rvt-map
+       (reduce (fn [m [r _]]
+                 (let [c (or (some-> r m dec) 0)]
+                   (if (> c 0)
+                     (assoc m r c)
+                     (dissoc m r))))
+               dont-complete)
+       (assoc n :dont-complete)))
+
+
 (defn update-and-propagate!
   "Updates reactives with the contents of the reactive-values map,
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
   [network rvt-map]
-  (loop [n   (propagate! network (deliver-values! rvt-map))
+  (loop [n   (propagate! (allow-completion network rvt-map)
+                         (deliver-values! rvt-map))
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))
           next-prs    (pending-reactives next-n)]
       (if (and progress? (seq next-prs))
         (recur next-n next-prs)
-        n))))
+        next-n))))
 
 
 (defn complete-and-propagate!
@@ -727,7 +749,7 @@
   "Adds links to the network using update on the
   networks ref. Returns the network ref."
   [netref & links]
-  (update netref add-links [links])
+  (update netref update-links [#{} links])
   (update netref update-and-propagate! [nil]))
 
 
@@ -735,7 +757,7 @@
   "Removes links from the network using update on the
   networks ref. Returns the network ref."
   [netref pred]
-  (update netref remove-links [pred])
+  (update netref update-links [pred []])
   (update netref update-and-propagate! [nil]))
 
 
@@ -769,10 +791,6 @@
     "Execute a no-arg function."))
 
 
-(deftype FutureExecutor []
-  IExecutor
-  (execute [e f] (future (f))))
-
 
 (defn safely-apply
   "Applies f to xs, and catches exceptions.
@@ -794,11 +812,11 @@
        :exception ex)))
 
 
-(defn make-async-link-fn
-  "Takes a function and wraps it's execution in a future.
+(defn make-exec-link-fn
+  "Takes a function and wraps it's execution in an executors execute.
   Any result will be pushed asynchronously to the network."
   ([executor f]
-     (make-async-link-fn f make-result-map))
+     (make-exec-link-fn f make-result-map))
   ([executor f result-fn]
      (let [netref *netref*]
        (fn [{:keys [input-reactives input-rvts] :as input}]
@@ -824,5 +842,24 @@
      (fn [{:keys [input-rvts] :as input}]
        (let [[v ex] (safely-apply f (values input-rvts))]
          (result-fn input v ex)))))
+
+
+(defn fn-spec?
+  [f]
+  (or (instance? clojure.lang.IFn f)
+      (and (map? f) (instance? clojure.lang.IFn (:f f)))))
+
+
+(defn async-exec?
+  [{:keys [f executor]}]
+  (and f executor))
+
+
+(defn unpack-fn
+  [{:keys [f executor] :as fn-spec}]
+  (if (async-exec? fn-spec)
+    [(partial make-exec-link-fn executor) f]
+    [make-sync-link-fn fn-spec]))
+
 
 :ok

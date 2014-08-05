@@ -91,35 +91,6 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Wrapping of functions
-
-
-(defn async
-  [f]
-  {:async f})
-
-
-(defn- unpack-fn
-  [fn-or-map]
-  (if-let [f (:async fn-or-map)]
-    [make-async-link-fn f]
-    [make-sync-link-fn fn-or-map]))
-
-
-(defn- fn-spec?
-  [f]
-  (or (instance? clojure.lang.IFn f)
-      (and (map? f) (instance? clojure.lang.IFn (:async f)))))
-
-;; How to define link functions?
-#_ (def b (rmap {:f foobar
-                 :link-fn-factory [sync, future, go]
-                 :result-fn (fn [])
-                 :error-fn (fn []) }))
-
-
-
-;; ---------------------------------------------------------------------------
 ;; Enqueuing reactives and switching bewteen them
 
 (defn- make-reactive-queue
@@ -170,13 +141,16 @@
   If passed any other value return a function that always returns it."
   [f-or-ref-or-value]
   (cond
-   (fn? f-or-ref-or-value) #(try (f-or-ref-or-value)
-                                 (catch Exception ex
-                                   (do (.printStackTrace ex)
-                                       ;; TODO what to push in case f fails?
-                                       ex)))
-   (instance? clojure.lang.IDeref f-or-ref-or-value) #(deref f-or-ref-or-value)
-   :else (constantly f-or-ref-or-value)))
+   (fn? f-or-ref-or-value)
+   #(try (f-or-ref-or-value)
+         (catch Exception ex
+           (do (.printStackTrace ex)
+               ;; TODO what to push in case f fails?
+               ex)))
+   (instance? clojure.lang.IDeref f-or-ref-or-value)
+   #(deref f-or-ref-or-value)
+   :else
+   (constantly f-or-ref-or-value)))
 
 
 (defn- derive-new
@@ -245,17 +219,24 @@
 (declare seqstream)
 
 (defn just
-  [x]
-  (seqstream [((sample-fn x))]))
+  [{:keys [executor f] :as x}]
+  (if (and executor f)
+    (let [netref *netref*
+          new-r  (eventstream "just")]
+      (execute executor #(rn/push! netref new-r (f)))
+      new-r)
+    (assoc (seqstream [((sample-fn x))])
+      :label "just")))
 
 
 (defn sample
-  [millis f-or-ref-or-value]
-  (let [f          (sample-fn f-or-ref-or-value)
-        new-r      (eventstream "sample")
-        netref     *netref*
-        task       (sched/interval scheduler millis
-                                   #(rn/push! netref new-r (f)))]
+  [millis {:keys [executor f] :as x}]
+  (let [netref  *netref*
+        new-r   (eventstream "sample")
+        task-f  (if (and executor f)
+                  #(execute executor (fn [] (rn/push! netref new-r (f))))
+                  #(rn/push! netref new-r ((sample-fn x))))]
+    (sched/interval scheduler millis task-f)
     new-r))
 
 
@@ -413,14 +394,14 @@
   [millis reactive]
   {:pre [(pos? millis) (reactive? reactive)]
    :post [(reactive? %)]}
-  (derive-new eventstream "delay" [reactive]
-              :link-fn
-              (fn [{:keys [input-rvts output-reactives] :as input}]
-                (let [output (first output-reactives)
-                      v      (fvalue input-rvts)
-                      netref *netref*]
-                  (sched/once scheduler millis #(rn/push! netref output v))
-                  nil))))
+  (let [netref *netref*]
+    (derive-new eventstream "delay" [reactive]
+                :link-fn
+                (fn [{:keys [input-rvts output-reactives] :as input}]
+                  (let [output (first output-reactives)
+                        v      (fvalue input-rvts)]
+                    (sched/once scheduler millis #(rn/push! netref output v))
+                    {:prevent-completion [output]})))))
 
 
 (defn distinct
