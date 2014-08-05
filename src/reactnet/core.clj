@@ -5,8 +5,6 @@
            [java.util WeakHashMap]))
 
 ;; TODOs
-;; - Introduce arbitrary executors (future, core.async, UI thread) through
-;;   and executor protocol
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Add pause! and resume! for the engine
@@ -84,6 +82,7 @@
 ;;   :add                 A seq of links to be added to the network
 ;;   :remove-by           A predicate that matches links to be removed
 ;;                        from the network
+;;   :dont-complete       A seq of reactives that must not be completed automatically
 
 ;; Network:
 ;; A map containing
@@ -460,12 +459,12 @@
   the :pending-completion set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
   [{:keys [pending-completions dont-complete] :as n}]
-  (doseq [r (->> n :pending-completions
+  (doseq [r (->> pending-completions
                  (remove dont-complete))]
     (push! r ::completed))
   (assoc n
     :pending-completions
-    (->> n :pending-completions
+    (->> pending-completions
          (filter dont-complete)
          set)))
 
@@ -477,9 +476,9 @@
   (let [links-to-remove (filter remove-by-pred links)
         remaining-links (remove remove-by-pred links)]
     (when (seq links-to-remove)
-                   (dump-links "REMOVE" links-to-remove))
+      (dump-links "REMOVE" links-to-remove))
     (when (seq new-links)
-                   (dump-links "ADD" new-links))
+      (dump-links "ADD" new-links))
     (-> n
         (assoc :pending-completions (->> links-to-remove
                                          (mapcat :complete-on-remove)))
@@ -493,7 +492,7 @@
   referenced by removed links :complete-on-remove seq."
   [{:keys [links dont-complete] :as n} results]
   (let [dont-complete   (->> results
-                             (mapcat :prevent-completion)
+                             (mapcat :dont-complete)
                              (reduce (fn [m r]
                                        (assoc m r (or (some-> r m inc) 1)))
                                      dont-complete))
@@ -507,6 +506,7 @@
                                             (into ls)))
                                      #{}))
         links-to-add    (->> results (mapcat :add) set)]
+    #_ (dump "- DON'T COMPLETE" (map (fn [[r c]] (str (:label r) " " c "  ")) dont-complete))
     (-> n
         (assoc :dont-complete dont-complete)
         (update-links links-to-remove links-to-add))))
@@ -531,13 +531,16 @@
   returned nil."
   [rvt-map {:keys [link-fn level] :as link}]
   (let [inputs       (link-inputs link)
+        outputs      (->> link link-outputs (remove nil?))
         input        {:link link
                       :input-reactives inputs 
                       :input-rvts (for [r inputs] [r (rvt-map r)])
-                      :output-reactives (->> link link-outputs (remove nil?))
-                      :output-rvts nil}
+                      :output-reactives outputs
+                      :output-rvts nil
+                      :dont-complete (set outputs)}
         result        (try (link-fn input)
-                           (catch Exception ex {:exception ex}))
+                           (catch Exception ex {:exception ex
+                                                :dont-complete nil}))
         error-result  (handle-exception! link (merge input result))]
     (merge input result error-result)))
 
@@ -578,8 +581,8 @@
 
 
 (defn- deliver-values!
-  "Updates all reactives from the reactive-values map and returns this
-  map."
+  "Updates all reactives from the reactive-values map and returns a
+  seq of pending reactives."
   [rvt-map]
   (doseq [[r vt] rvt-map]
     (when-not (completed? r)
@@ -658,28 +661,6 @@
                                 downstream-rvts)))))
 
 
-(defn- propagate-downstream!
-  "Propagate values to reactives that are guaranteed to be downstream."
-  [network pending-links downstream-rvts]
-  (loop [n network
-         rvts downstream-rvts]
-    (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
-                                          (if (rvm r)
-                                            [rvm (conj remaining [r vt])]
-                                            [(assoc rvm r vt) remaining]))
-                                        [{} []]
-                                        rvts)]
-      (if (seq rvtm)
-        (recur (propagate! n pending-links (deliver-values! rvtm))
-               remaining-rvts)
-        (dissoc n :unchanged?)))))
-
-
-(defn- pending-reactives
-  [{:keys [rid-map]}]
-  (->> rid-map keys (filter pending?)))
-
-
 (defn- allow-completion
   [{:keys [dont-complete] :as n} rvt-map]
   (->> rvt-map
@@ -692,19 +673,42 @@
        (assoc n :dont-complete)))
 
 
+(defn- propagate-downstream!
+  "Propagate values to reactives that are guaranteed to be downstream."
+  [network pending-links downstream-rvts]
+  (loop [n network
+         rvts downstream-rvts]
+    (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
+                                          (if (rvm r)
+                                            [rvm (conj remaining [r vt])]
+                                            [(assoc rvm r vt) remaining]))
+                                        [{} []]
+                                        rvts)]
+      (if (seq rvtm)
+        (recur (propagate! (allow-completion n rvtm) pending-links (deliver-values! rvtm))
+               remaining-rvts)
+        (dissoc n :unchanged?)))))
+
+
+(defn- pending-reactives
+  [{:keys [rid-map]}]
+  (->> rid-map keys (remove nil?) (filter pending?)))
+
+
 (defn update-and-propagate!
   "Updates reactives with the contents of the reactive-values map,
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
   [network rvt-map]
-  (loop [n   (propagate! (allow-completion network rvt-map)
+  (loop [c   100
+         n   (propagate! (allow-completion network rvt-map)
                          (deliver-values! rvt-map))
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))
           next-prs    (pending-reactives next-n)]
-      (if (and progress? (seq next-prs))
-        (recur next-n next-prs)
+      (if (and (> c 0) progress? (seq next-prs))
+        (recur (dec c) next-n next-prs)
         next-n))))
 
 

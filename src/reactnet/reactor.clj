@@ -87,7 +87,9 @@
 (defn reset-network!
   []
   (sched/cancel-all scheduler)
-  (remove-links! *netref* (constantly true)))
+  (update *netref* #(assoc % :dont-complete {}) [])
+  (remove-links! *netref* (constantly true))
+  :reset)
 
 
 ;; ---------------------------------------------------------------------------
@@ -110,12 +112,13 @@
       (assoc queue-state
         :queue (vec (rest uncompleted))
         :input r
+        :dont-complete [output]
         :add [(make-link "temp" [r] [output]
                          :complete-fn
                          (fn [_ r]
                            (c/merge (c/swap! q-atom switch-reactive q-atom)
                                     {:remove-by #(= [r] (link-inputs %))})))])
-      queue-state)))
+      (dissoc queue-state :dont-complete :add))))
 
 
 (defn- enqueue-reactive
@@ -401,7 +404,7 @@
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)]
                     (sched/once scheduler millis #(rn/push! netref output v))
-                    {:prevent-completion [output]})))))
+                    nil)))))
 
 
 (defn distinct
@@ -422,7 +425,7 @@
               :link-fn
               (fn [{:keys [input-rvts] :as input}]
                 (if (apply pred (values input-rvts))
-                  {}
+                  {:dont-complete nil}
                   (make-result-map input (fvalue input-rvts))))))
 
 
@@ -444,7 +447,7 @@
                   (let [vs (:dequeued (c/swap! q enqueue (fvalue input-rvts)))]
                     (if (seq vs)
                       {:output-rvts (single-value (first vs) (first output-reactives))}
-                      {}))))))
+                      {:dont-complete nil}))))))
 
 (defn every
   ([reactive]
@@ -638,6 +641,7 @@
                 (if (apply pred (values input-rvts))
                   {:output-rvts (single-value (fvalue input-rvts) (first output-reactives))}
                   {:no-consume true
+                   :dont-complete nil
                    :remove-by #(= (link-outputs %) output-reactives)}))))
 
 
