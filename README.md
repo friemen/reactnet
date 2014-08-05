@@ -20,14 +20,14 @@ This library is a low-level tool for creating combinators that follow
 ideas.
 
 To illustrate how reactnet can be used we take three steps:
-* Provide functions that conveniently define links.
+* Provide functions that conveniently create links.
 * Define the network itself, consisting of reactives and links between them.
 * Use the network by pushing values to it.
 
-For a complete overview please see the
-[example](https://github.com/friemen/reactnet/blob/master/src/reactnet/example.clj).
+You find the code of the following three sections in the
+[example namespace](https://github.com/friemen/reactnet/blob/master/src/reactnet/example.clj).
 
-### Links
+### Define link factories
 A *network* is solely defined by a set of links that refer to reactives.
 
 A *reactive* is a thing that takes/returns values, *eventstreams* and
@@ -80,15 +80,15 @@ of the inputs. Any result is ignored.
 ```
 
 As you can see a link-function receives a map and returns a map, which
-in both cases is a Result map, for details see the Concepts section
-below.
+in both cases is a Result map. For details about its purpose and
+contents please see the Concepts section below.
 
 To make the network act dynamically with respect to the values flowing
 through it, the link-functions must also be able to add or remove
 links. (The code above does not demonstrate this.)
 
 
-### The network
+### Define a network
 
 To actually create a network the following suffices:
 ```clojure
@@ -123,7 +123,7 @@ other words: variables. They always have a value. This is the main
 difference to *Eventstreams* which can be seen as sequences of
 value/timestamp pairs. Once a value is consumed it's gone.
 
-We stick to Behaviors. Here we create four of them, which are not
+For now we stick to Behaviors. Here we create four of them, which are not
 connected to any network and independent of each other:
 
 ```clojure
@@ -177,7 +177,7 @@ We can inspect it using `(pp netref)` ...
 ```
 
 
-### Using it
+### Use the network
 
 Let's update `x`
 
@@ -264,7 +264,7 @@ A map connecting input and output reactives via a function.
   :label               Label for pretty printing
   :inputs              Input reactives
   :outputs             Output reactives, each wrapped in WeakReference
-  :link-fn             A link function [Result -> Result] (see below)
+  :link-fn             A link-function [Result -> Result] (see below)
   :error-fn            An error handling function [Result -> Result] (see below)
   :complete-fn         A function [Link Reactive -> Result] called when one of the
                        input reactives becomes completed
@@ -300,6 +300,7 @@ count as "all completed or nil".
 ### Result
 A map passed into / returned by the link-fn, error-fn and complete-fn
 with the following entries
+
 ```
   :input-reactives     The links input reactives
   :output-reactives    The links output reactives
@@ -311,6 +312,8 @@ with the following entries
   :add                 A seq of links to be added to the network
   :remove-by           An unary predicate that matches links to
                        be removed from the network
+  :dont-complete       A seq of reactives that must not be completed
+                       automatically
 ```
 
 This map is the primary means for data exchange between functions
@@ -319,13 +322,20 @@ attached to links and the propagation / update algorithm.
 
 ### Network
 A map containing the following entries
+
 ```
   :id                  A string containing an identifier
   :links               Collection of links
   :rid-map             WeakHashMap {Reactive -> rid} (derived)
   :level-map           Map {rid -> topological-level} (derived)
   :links-map           Map {rid -> Seq of links} (derived)
+  :dont-complete       Map {Reactive -> c} of reactives that are not
+                       automatically completed as long as c > 0 
+  :pending-completions A seq of reactives that will receive ::completed
+                       as soon as they are not contained in the
+					   :dont-complete map
 ```
+
 `rid` is a reactive identifier, an integer which is unique within a network.
 
 
@@ -351,8 +361,8 @@ decide
 
 * On which input and output reactives does it operate?
 * How are output values computed from input values? Put it into
-  the link function of type [Result -> Result].
-* What should happen in case the link function throws an exception?
+  the link-function of type [Result -> Result].
+* What should happen in case the link-function throws an exception?
   The answer is encoded into the error handler, again of type
   [Result -> Result].
 * What happens if one of the input reactives becomes completed? This
@@ -369,7 +379,7 @@ A link connects input with output reactives, consequently you pass
 these to the `make-link` function.
 
 In addition you can specify which reactives shall be completed when
-this link is removed from network by listing them in the value for
+this link is removed from the network by listing them in the value for
 `:complete-on-remove`.  Since links are automatically removed when
 they are considered dead this will lead to automatic completion.
 
@@ -379,10 +389,10 @@ properly.
 
 ### Link function
 
-The link function is called in a propagation cycle if the link is
+The link-function is called in a propagation cycle if the link is
 ready and the topological level of the cycle matches the links level.
 
-Upon invocation the link function will receive the following entries
+Upon invocation the link-function will receive the following entries
 in a map:
 
 ```
@@ -397,19 +407,21 @@ helpers:
 * `(values rvts)` returns a seq of values from a seq of RVTs.
 
 
-The link function can add the following entries
+The link-function can add the following entries
 
 ```
   :output-rvts         A seq of RVTs that will get delivered 
   :no-consume          True if the preceding link evaluation
                        does not cause consumption of the input
+  :dont-complete       A seq of reactives that must not be completed
+                       automatically
   :exception           Exception, or nil if output-rvts is valid
   :add                 A seq of links to be added to the network
   :remove-by           An unary predicate that matches links to be
                        removed from the network
 ```
 
-Essentially the link function tells the algorithm
+Essentially the link-function tells the algorithm
 * which values to deliver to other reactives (`:output-rvts`),
 * which new links to add to the network (`:add`),
 * which links to remove from the network (`:remove-by`).
@@ -427,22 +439,23 @@ functions for convenience:
 
 
 The `:no-consume` entry helps to avoid unwanted consumption of
-values. Before invoking the link function the algorithm asks for new
+values. Before invoking the link-function the algorithm asks for new
 values by invoking `next-value` on each input reactive. Only after
 evaluation the values are actually consumed by invoking `consume!` on
 each reactive. The value of a reactive is NOT consumed if all links
-depending on it return a truthy value for `:no-consume`. This
-enables link functions to reject a value after they examined it,
-`take-while` is a good example where this is required.
+depending on it return a truthy value for `:no-consume`. This enables
+link-functions to reject a value after they examined it, a
+implementation like `take-while` is a good example where this is
+required.
 
 
 ### Error handler
 
-If the link function throws an exception or returns a Result with an
-`:exception` entry the error handler is invoked with the `:exception`
-entry.
+If the link-function throws an exception or returns a Result
+containing an `:exception` entry the error handler is invoked with the
+`:exception` entry.
 
-The error handler can use the same entries as the link function. After
+The error handler can use the same entries as the link-function. After
 the error handler has been invoked the `:exception` entry has no
 further effect. Instead of directly returning values the error handler
 can schedule a task or push values via the network refs `update`
@@ -469,7 +482,6 @@ TODO Give some more background on
 
 * Topological levels
 * WeakReferences for outputs
-* Automatic link removal / completion
 * Backpressure
 
 
@@ -488,8 +500,8 @@ Steps:
 1. Collect links that must be evaluated because they're either pending
    or have an input reactive that is contained in the
    pending-reactives.
-2. Of the pending links take only those that are on the minimum
-   topological level and are actually ready to be evaluated.
+2. Select only those links that are on the minimum topological level
+   and are actually ready to be evaluated.
 3. Get next values from input reactive of the links that are going to
    be evaluated.
 4. Evaluate all links on the same topological level, and collect
@@ -498,8 +510,9 @@ Steps:
 6. Look for completed reactives, invoke corresponding link
    complete-fns, and collect the results.
 7. Update the network from the results, which basically means add /
-   remove links. An update causes re-calculation of the topological
-   level assignment of links and reactives.
+   remove links and complete reactives. An update causes
+   re-calculation of the topological level assignment of links and
+   reactives.
 8. Push all upstream values contained in results, so they get enqueued
    for another propagation cycle, they will not be delivered/handled in
    this cycle.
@@ -511,6 +524,31 @@ checks if there are still pending reactives. If yes, another
 propagation cycle is started right-away. However, it is possible that
 no link is ready to be evaluated, leading to no new results. In this
 case the loop is terminated.
+
+
+### Automatic link removal and completion
+
+A link with at least one completed input or no un-completed output is
+useless. It's called *dead* and will automatically be removed in
+`(update-from-results network results)`. Links point via
+`:complete-on-remove` key to those reactives that will not receive any
+further input if the link is dead. However, this doesn't mean that
+these reactives are immediately allowed to go into the completed state
+since asynchronous / delayed computations started from within
+link-functions could try to push values to these reactives.
+
+Therefore the network maintains a `:dont-complete` map that records
+the number of pending pushes for each reactive. This counter is
+increased for a reactive whenever it is contained in a
+`:dont-complete` seq that the link-function returns as part of the
+result map. By default all output reactives of the link are listed,
+but link-functions can override this. The counter for a reactive is
+decreased whenever a value is delivered.
+
+In addition the network maintains a `:pending-completions` seq that
+contains those reactives which are to be completed unless they appear
+in the networks `:dont-complete` map.
+
 
 
 ## License

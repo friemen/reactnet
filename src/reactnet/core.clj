@@ -92,9 +92,11 @@
 ;;                        rid = reactive id (derived)
 ;;   :level-map           Map {rid -> topological-level} (derived)
 ;;   :links-map           Map {rid -> Seq of links} (derived)
-;;   :pending-completions A seq of reactives that will receive ::completed
 ;;   :dont-complete       Map {Reactive -> c} of reactives that are not
 ;;                        automatically completed as long as c > 0
+;;   :pending-completions A seq of reactives that will receive ::completed
+;;                        as soon as they are not contained in the
+;;                        :dont-complete map
 
 ;; NetworkRef:
 ;; Serves as abstraction of how the network is stored and
@@ -456,7 +458,7 @@
 
 (defn- complete-pending
   "Asynchronously completes all reactives contained in
-  the :pending-completion set of the network n. Excludes reactives
+  the :pending-completions set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
   [{:keys [pending-completions dont-complete] :as n}]
   (doseq [r (->> pending-completions
@@ -486,7 +488,7 @@
         complete-pending)))
 
 
-(defn ^:no-doc update-from-results!
+(defn ^:no-doc update-from-results
   "Takes a network and a seq of result maps and returns an updated
   network, with links added and removed. Completes reactives
   referenced by removed links :complete-on-remove seq."
@@ -639,7 +641,7 @@
            unchanged?      (->> results (remove :no-consume) empty?)
            
            ;; apply network changes returned by link and complete functions
-           network         (update-from-results! network results)
+           network         (update-from-results network results)
            
            all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
@@ -714,11 +716,10 @@
 
 (defn complete-and-propagate!
   "Takes a network and a reactive, delivers the ::completed value into
-  the reactive and returns an updated network."
+  the reactive or and returns an updated network."
   [n reactive]
   (deliver! reactive [::completed (now)])
   (update-and-propagate! n nil))
-
 
 
 (defn push!
@@ -830,7 +831,7 @@
                           result-map  (result-fn input v ex)]
                       ;; send changes / values to netref
                       (when (or (seq (:add result-map)) (:remove-by result-map))
-                        (update netref update-from-results! [[result-map]]))
+                        (update netref update-from-results [[result-map]]))
                       (doseq [[r [v t]] (:output-rvts result-map)]
                         (push! r v)))))
          nil))))
