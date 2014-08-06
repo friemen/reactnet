@@ -7,18 +7,9 @@
 ;; TODOs
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
-;; - Add pause! and resume! for the engine
+;; - Add pause! and resume! for the netref
 ;; - Graphviz visualization of the network
 ;; - Support interceptor?
-
-;; Ideas about error handling
-;; - An exception is thrown by custom functions invoked from a link
-;;   function
-;; - A link contains an error-fn function
-;; - It should support features like 'return', 'retry', 'resume', 'ignore'
-;; - It should allow redirection of an exception to a specific eventstream
-;; - A retry would push! the same values again
-;; - Special care must be taken for async operations
 
 
 ;; ---------------------------------------------------------------------------

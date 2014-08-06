@@ -22,14 +22,20 @@
 
 
 ;; TODOS
+;; - Remove the mandatory label from the behavior/eventstream factories
 ;; - How to prevent scheduled tasks from accumulating?
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 ;; - Implement unsubscribe
-;; - Implement proper error handling
-;; - Implement execution-modes (sync, async, future)
 ;; - Implement empty
 ;; - Implement repeat
 ;; - Is cycle useful?
+;; - Implement proper error handling:
+;; - It should support features like 'return', 'retry', 'resume', 'ignore'
+;; - It should allow redirection of an exception to a specific eventstream
+;; - A retry would push! the same values again
+;; - Special care must be taken for async operations
+
+
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL
@@ -703,6 +709,20 @@
     (behavior label x)))
 
 
+(defn ^:no-doc and-f
+  [& xs]
+  (if (next xs)
+    (and (first xs) (apply and-f (rest xs)))
+    (first xs)))
+
+
+(defn ^:no-doc or-f
+  [& xs]
+  (if (next xs)
+    (or (first xs) (apply or-f (rest xs)))
+    (first xs)))
+
+
 (defn ^:no-doc lift-fn
   [f & reactives]
   {:pre [(fn-spec? f) (every? reactive? reactives)]
@@ -740,7 +760,7 @@
 (defn- lift-dispatch
   [expr]
   (if (list? expr)
-    (if (#{'if 'cond 'let} (first expr))
+    (if (#{'if 'cond 'let 'and 'or} (first expr))
       (first expr)
       'fn-apply)
     'symbol))
@@ -782,6 +802,16 @@
 (defmethod lift* 'cond
   [[_ & exprs]]
   `(lift-cond ~@(lift-exprs exprs)))
+
+
+(defmethod lift* 'and
+  [[_ & exprs]]
+  `(lift-fn and-f ~@(lift-exprs exprs)))
+
+
+(defmethod lift* 'or
+  [[_ & exprs]]
+  `(lift-fn or-f ~@(lift-exprs exprs)))
 
 
 ;; ---------------------------------------------------------------------------

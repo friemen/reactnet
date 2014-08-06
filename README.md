@@ -502,7 +502,7 @@ Steps:
    pending-reactives.
 2. Select only those links that are on the minimum topological level
    and are actually ready to be evaluated.
-3. Get next values from input reactive of the links that are going to
+3. Get next values from input reactives of the links that are going to
    be evaluated.
 4. Evaluate all links on the same topological level, and collect
    results.
@@ -538,7 +538,7 @@ since asynchronous / delayed computations started from within
 link-functions could try to push values to these reactives.
 
 Therefore the network maintains a `:dont-complete` map that records
-the number of pending pushes for each reactive. This counter is
+the number of expected deliveries for each reactive. This counter is
 increased for a reactive whenever it is contained in a
 `:dont-complete` seq that the link-function returns as part of the
 result map. By default all output reactives of the link are listed,

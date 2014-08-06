@@ -482,3 +482,27 @@
     (is (= @z 8))
     (push-and-wait! x 10)
     (is (= @z 10))))
+
+
+(deftest lift-and-test
+  (let [x (r/behavior "x" true)
+        y (r/behavior "y" false)
+        z (r/lift (and x y))]
+    (wait)
+    (is (not @z))
+    (push-and-wait! y 1)
+    (is @z)
+    (push-and-wait! x nil)
+    (is (not @z))))
+
+
+(deftest lift-or-test
+  (let [x (r/behavior "x" true)
+        y (r/behavior "y" false)
+        z (r/lift (or x y))]
+    (wait)
+    (is @z)
+    (push-and-wait! x nil)
+    (is (not @z))
+    (push-and-wait! y 1)
+    (is @z)))
