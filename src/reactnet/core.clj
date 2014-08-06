@@ -32,8 +32,8 @@
     "Returns the next value-timestamp pair of the reactive r without
     consuming it.")
   (available? [r]
-    "Returns true if the reactive r would provide a value upon
-    consume!.")
+    "Returns true if the reactive r will provide a value upon
+    next-value / consume.")
   (pending? [r]
     "Returns true if r contains values that wait for being consumed.")
   (completed? [r]
@@ -104,10 +104,10 @@
 
 (defprotocol INetworkRef
   (update [netref f args]
-    "Apply f to the current network state (as first arg) and the
+    "Apply f to the current network map (as first arg of f) and the
     arguments given in the args vector.")
   (network [netref]
-    "Return the network state."))
+    "Return the network map."))
 
 
 
@@ -117,9 +117,9 @@
 ;; Functions that operate on reactives.
 
 (defn reactive?
-  "Returns true if the reactive satisfies IReactive."
-  [reactive]
-  (satisfies? IReactive reactive))
+  "Returns true if the r satisfies IReactive."
+  [r]
+  (satisfies? IReactive r))
 
 
 ;; ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@
 
 
 (defn fvalue
-  "Extracts the value from the first of an RVT seq."
+  "Extracts the value from the first item of an RVT seq."
   [rvts]
   (-> rvts first value))
 
@@ -205,7 +205,7 @@
 
 
 (defn link-outputs
-  "Returns the output-reactives of a link."
+  "Returns the output-reactives of a link, unwrapping them from WeakReferences."
   [link]
   (-> link :outputs wref-unwrap))
 
@@ -712,7 +712,7 @@
         (dissoc n :unchanged?)))))
 
 
-(defn update-and-propagate!
+(defn ^:no-doc update-and-propagate!
   "Updates reactives with the contents of the reactive-values map,
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
@@ -729,11 +729,11 @@
         next-n))))
 
 
-(defn complete-and-propagate!
+(defn ^:no-doc complete-and-propagate!
   "Takes a network and a reactive, delivers the ::completed value into
-  the reactive or and returns an updated network."
-  [n reactive]
-  (deliver! reactive [::completed (now)])
+  the reactive and returns an updated network."
+  [n r]
+  (deliver! r [::completed (now)])
   (update-and-propagate! n nil))
 
 
@@ -742,39 +742,38 @@
 
 
 (defn push!
-  "Starts an update of a reactive and a propagation cycle using
-  the netrefs update function. Returns the value."
-  ([reactive value]
-     (push! *netref* reactive value))
-  ([netref reactive value]
-     (push! netref reactive value (now)))
-  ([netref reactive value timestamp]
-     (update netref update-and-propagate! [{reactive [value timestamp]}])
-     value))
+  "Delivers a value v to the reactive r and starts a propagation
+  cycle. Returns the value v."
+  ([r v]
+     (push! *netref* r v))
+  ([netref r v]
+     (push! netref r v (now)))
+  ([netref r v t]
+     (update netref update-and-propagate! [{r [v t]}])
+     v))
 
 
 (defn complete!
-  "Delivers the ::completed value into a reactive and notifies the
-  complete-fn handler of all links that the reactive is an input
-  of. Updates the network according to results of handlers."
-  ([reactive]
-     (complete! *netref* reactive))
-  ([netref reactive]
-     (update netref complete-and-propagate! [reactive])
+  "Delivers the ::completed value into a reactive r and notifies the
+  complete-fn handler of all links which have r as their
+  input. Updates the network according to results of
+  handlers. Returns ::completed."
+  ([r]
+     (complete! *netref* r))
+  ([netref r]
+     (update netref complete-and-propagate! [r])
      ::completed))
 
 
 (defn add-links!
-  "Adds links to the network using update on the
-  networks ref. Returns the network ref."
+  "Adds links to the network. Returns the network ref."
   [netref & links]
   (update netref update-links [#{} links])
   (update netref update-and-propagate! [nil]))
 
 
 (defn remove-links!
-  "Removes links from the network using update on the
-  networks ref. Returns the network ref."
+  "Removes links from the network. Returns the network ref."
   [netref pred]
   (update netref update-links [pred []])
   (update netref update-and-propagate! [nil]))
@@ -805,9 +804,9 @@
 
 
 (defprotocol IExecutor
-  (execute [e f]
-    "Execute a no-arg function."))
-
+  (execute [e netref f]
+    "Execute a no-arg function f in the context of the network
+    reference netref."))
 
 
 (defn safely-apply
@@ -831,15 +830,22 @@
 
 
 (defn make-exec-link-fn
-  "Takes a function and wraps it's execution in an executors execute.
-  Any result will be pushed asynchronously to the network.
-  Returns a link function."
+  "Takes a function f and wraps it's execution in an executors execute, 
+  thus allowing a different thread to evaluate f.
+  Any result will be pushed asynchronously into the network.
+
+  The optional result-fn is a function [Result Value Exception -> Result] 
+  that returns the input Result map with updated values for 
+  :output-rvts, :exception, :add, :remove-by, :no-consume entries.
+
+  Returns a link function."  
   ([executor f]
      (make-exec-link-fn f make-result-map))
   ([executor f result-fn]
      (let [netref *netref*]
        (fn [{:keys [input-reactives input-rvts] :as input}]
          (execute executor
+                  netref
                   (fn []
                     (let [[v ex]      (safely-apply f (values input-rvts))
                           result-map  (result-fn input v ex)]
@@ -852,9 +858,15 @@
 
 
 (defn make-sync-link-fn
-  "Takes a function and wraps it's execution so that exceptions are
-  caught and the return value is properly assigned to all output
-  reactives. Returns a link function."
+  "Takes a function f and wraps it's synchronous execution so that
+  exceptions are caught and the return value is properly assigned to
+  all output reactives.
+
+  The optional result-fn is a function [Result Value Exception -> Result] 
+  that returns the input Result map with updated values for 
+  :output-rvts, :exception, :add, :remove-by, :no-consume entries.
+
+  Returns a link function."
   ([f]
      (make-sync-link-fn f make-result-map))
   ([f result-fn]
@@ -864,8 +876,8 @@
 
 
 (defn fn-spec?
-  "Returns true if f is either function or a map containing a function
-  in an :f entry."
+  "Returns true if f is either a function or a map containing a
+  function in an :f entry."
   [f]
   (or (instance? clojure.lang.IFn f)
       (and (map? f) (instance? clojure.lang.IFn (:f f)))))

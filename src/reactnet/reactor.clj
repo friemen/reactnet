@@ -1,16 +1,24 @@
 (ns reactnet.reactor
   "Factories and combinators for FRP style behaviors and eventstreams."
-  (:refer-clojure :exclude [concat count delay distinct drop drop-while drop-last
-                            filter into merge map mapcat reduce remove some
-                            swap! take take-last take-while])
+  (:refer-clojure :exclude [concat count delay distinct drop drop-while
+                            drop-last filter into merge map mapcat reduce
+                            remove some swap! take take-last take-while])
   (:require [clojure.core :as c]
             [clojure.string :as s]
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
-            [reactnet.core :as rn :refer :all :exclude [push! complete!]]
+            [reactnet.executors]
+            [reactnet.core :as rn
+             :refer [add-links! broadcast-value completed? default-link-fn
+                     enqueue-values execute fvalue fn-spec? link-inputs
+                     link-outputs make-link make-network make-result-map
+                     make-sync-link-fn *netref* now reactive? remove-links!
+                     single-value update unpack-fn values zip-values]
+             :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
-           [reactnet.reactives Behavior Eventstream Seqstream Fnbehavior]))
+           [reactnet.reactives Behavior Eventstream Seqstream Fnbehavior]
+           [reactnet.executors FutureExecutor]))
 
 
 ;; TODOS
@@ -31,8 +39,7 @@
                 (fn [_]
                   (agent-netref (make-network "default" []))))
 
-(defonce ^{:doc "A single scheduler."}
-  scheduler (sched/scheduler 5))
+(defonce ^:no-doc scheduler (sched/scheduler 5))
 
 
 ;; ---------------------------------------------------------------------------
@@ -224,9 +231,8 @@
 (defn just
   [{:keys [executor f] :as x}]
   (if (and executor f)
-    (let [netref *netref*
-          new-r  (eventstream "just")]
-      (execute executor #(rn/push! netref new-r (f)))
+    (let [new-r  (eventstream "just")]
+      (execute executor *netref* #(rn/push! new-r (f)))
       new-r)
     (assoc (seqstream [((sample-fn x))])
       :label "just")))
@@ -237,7 +243,7 @@
   (let [netref  *netref*
         new-r   (eventstream "sample")
         task-f  (if (and executor f)
-                  #(execute executor (fn [] (rn/push! netref new-r (f))))
+                  #(execute executor netref (fn [] (rn/push! netref new-r (f))))
                   #(rn/push! netref new-r ((sample-fn x))))]
     (sched/interval scheduler millis task-f)
     new-r))
@@ -776,3 +782,12 @@
 (defmethod lift* 'cond
   [[_ & exprs]]
   `(lift-cond ~@(lift-exprs exprs)))
+
+
+;; ---------------------------------------------------------------------------
+;; Async execution
+
+
+(defn in-future
+  [f]
+  {:f f :executor (FutureExecutor.)})

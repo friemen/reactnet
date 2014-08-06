@@ -1,5 +1,5 @@
 (ns reactnet.netrefs
-  "Default INetworkRef implementations."
+  "Default INetworkRef implementations: Agent and Atom based."
   (:require [reactnet.core :refer [INetworkRef *netref*]]))
 
 ;; put this into it's own ns

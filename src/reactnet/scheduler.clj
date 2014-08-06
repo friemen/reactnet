@@ -1,6 +1,5 @@
 (ns reactnet.scheduler
-  "Scheduling functions, which are only a thin wrapper around JDKs
-  ScheduledThreadPoolExecutor."
+  "Scheduling functions based on JDKs ScheduledThreadPoolExecutor."
   (:import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit]))
 
 
