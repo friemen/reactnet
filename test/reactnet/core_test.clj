@@ -267,6 +267,33 @@
       (is (rn/completed? e4)))))
 
 
+(deftest no-premature-completion-test
+  (let [future-link-fn (fn [{:keys [input-rvts output-reactives]}]
+                         (future (Thread/sleep 100)
+                                 (let [v (rn/fvalue input-rvts)]
+                                   (doseq [o output-reactives]
+                                     (push! o v))))
+                         nil)
+        e1 (eventstream "e1")
+        e2 (eventstream "e2")
+        e3 (eventstream "e3")
+        e4 (eventstream "e4")
+        r  (atom [])]
+    (rn/with-netref
+      (refs/agent-netref
+       (rn/make-network "test" [(rn/make-link "e1->e2" [e1] [e2] :link-fn future-link-fn :complete-on-remove [e2])
+                                (rn/make-link "e2->e3" [e2] [e3] :link-fn future-link-fn :complete-on-remove [e3])
+                                (rn/make-link "e3->e4" [e3] [e4] :link-fn future-link-fn :complete-on-remove [e4])
+                                (link (partial swap! r conj) [e4] [])]))
+      (push! e1 42)
+      (Thread/sleep 150)
+      (push! e1 ::rn/completed)
+      (is (not (rn/completed? e4)))
+      (Thread/sleep 200)
+      (is (= [42] @r))
+      (is (rn/completed? e4)))))
+
+
 (deftest flatmap-test
   (let [f        (fn [c]
                    (let [e (eventstream (str "E" c))]

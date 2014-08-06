@@ -461,8 +461,10 @@
   the :pending-completions set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
   [{:keys [pending-completions dont-complete] :as n}]
+  (dump "= COMPLETE-PENDING WITHOUT" (s/join ", " (map (fn [[r c]] (str (:label r) " " c)) dont-complete)))
   (doseq [r (->> pending-completions
                  (remove dont-complete))]
+    (dump "PUSH COMPLETED" (:label r))
     (push! r ::completed))
   (assoc n
     :pending-completions
@@ -475,6 +477,7 @@
   "Removes links specified by the predicate or set and conjoins links
   to the networks links. Returns a new, rebuilded network."
   [{:keys [links] :as n} remove-by-pred new-links]
+  (dump "= UPDATE-LINKS")
   (let [links-to-remove (filter remove-by-pred links)
         remaining-links (remove remove-by-pred links)]
     (when (seq links-to-remove)
@@ -482,8 +485,8 @@
     (when (seq new-links)
       (dump-links "ADD" new-links))
     (-> n
-        (assoc :pending-completions (->> links-to-remove
-                                         (mapcat :complete-on-remove)))
+        (update-in [:pending-completions] concat (->> links-to-remove
+                                                      (mapcat :complete-on-remove)))
         (rebuild (concat remaining-links new-links))
         complete-pending)))
 
@@ -587,10 +590,9 @@
   seq of pending reactives."
   [rvt-map]
   (doseq [[r vt] rvt-map]
-    (when-not (completed? r)
-      (deliver! r vt))
-    (when (completed? r)
-      (dump "WARNING: trying to deliver into completed" r)))
+    (if (completed? r)
+      (dump "WARNING: trying to deliver" vt "into completed" r)
+      (deliver! r vt)))
   (->> rvt-map (map first) (filter pending?)))
 
 
@@ -603,11 +605,15 @@
      (propagate! network [] []))
   ([network pending-reactives]
      (propagate! network [] pending-reactives))
-  ([{:keys [rid-map links-map level-map] :as network}
+  ([{:keys [rid-map links-map level-map pending-completions dont-complete] :as network}
     pending-links pending-reactives]
      (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
+     (when (seq pending-completions)
+       (dump "  PENDING COMPLETIONS:" (->> pending-completions (map :label) (s/join ", "))))
+     (when (seq dont-complete)
+       (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
      (when (seq pending-reactives)
-       (dump "  PENDING:"(->> pending-reactives (map :label) (s/join ", "))))
+       (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", "))))
      (let [links           (->> pending-reactives
                                 (map (partial get rid-map))
                                 (mapcat links-map)
@@ -665,6 +671,7 @@
 
 (defn- allow-completion
   [{:keys [dont-complete] :as n} rvt-map]
+  (dump "= ALLOW COMPLETION" (:label (ffirst rvt-map)))
   (->> rvt-map
        (reduce (fn [m [r _]]
                  (let [c (or (some-> r m dec) 0)]
@@ -686,6 +693,7 @@
                                             [(assoc rvm r vt) remaining]))
                                         [{} []]
                                         rvts)]
+      (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvtm)))
       (if (seq rvtm)
         (recur (propagate! (allow-completion n rvtm) pending-links (deliver-values! rvtm))
                remaining-rvts)
@@ -702,6 +710,7 @@
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
   [network rvt-map]
+  (dump "= UPDATE-AND-PROPAGATE" (:label (ffirst rvt-map)))
   (loop [c   100
          n   (propagate! (allow-completion network rvt-map)
                          (deliver-values! rvt-map))
