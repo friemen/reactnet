@@ -254,7 +254,7 @@
                                                            (rn/make-result-map input v)) )
                                               :complete-on-remove [e3])
                                 (rn/make-link "e3->e4" [e3] [e4]
-                                              :complete-on-remove [e4])
+                                              :complete-on-remove [])
                                 (link (partial swap! r conj) [e4] [])]))
       (push! e1 1 e2 2)
       (Thread/sleep 200)
@@ -264,7 +264,7 @@
       (is (rn/completed? e1))
       (is (not (rn/completed? e2)))
       (is (rn/completed? e3))
-      (is (rn/completed? e4)))))
+      (is (not (rn/completed? e4))))))
 
 
 (deftest no-premature-completion-test
@@ -288,8 +288,9 @@
       (push! e1 42)
       (Thread/sleep 150)
       (push! e1 ::rn/completed)
+      (Thread/sleep 100)
       (is (not (rn/completed? e4)))
-      (Thread/sleep 200)
+      (Thread/sleep 100)
       (is (= [42] @r))
       (is (rn/completed? e4)))))
 

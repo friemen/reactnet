@@ -434,6 +434,13 @@
         (and (seq outputs) (every? completed? (remove nil? outputs))))))
 
 
+(defn ^:no-doc pending-reactives
+  "Returns a seq of pending reactives."
+  [{:keys [rid-map]}]
+  (->> rid-map keys (remove nil?) (filter pending?)))
+
+
+
 ;; ---------------------------------------------------------------------------
 ;; Modifying the network
 
@@ -471,6 +478,22 @@
     (->> pending-completions
          (filter dont-complete)
          set)))
+
+
+(defn- allow-completion
+  "Decreases the pending evaluations counter in
+  networks :dont-complete map and removes reactives if completion is
+  allowed again.  Returns an updated network."
+  [{:keys [dont-complete] :as n} rvt-map]
+  (dump "= ALLOW COMPLETION" (->> rvt-map keys (map :label)))
+  (->> rvt-map
+       (reduce (fn [m [r _]]
+                 (let [c (or (some-> r m dec) 0)]
+                   (if (> c 0)
+                     (assoc m r c)
+                     (dissoc m r))))
+               dont-complete)
+       (assoc n :dont-complete)))
 
 
 (defn ^:no-doc update-links
@@ -669,40 +692,24 @@
                                 downstream-rvts)))))
 
 
-(defn- allow-completion
-  [{:keys [dont-complete] :as n} rvt-map]
-  (dump "= ALLOW COMPLETION" (:label (ffirst rvt-map)))
-  (->> rvt-map
-       (reduce (fn [m [r _]]
-                 (let [c (or (some-> r m dec) 0)]
-                   (if (> c 0)
-                     (assoc m r c)
-                     (dissoc m r))))
-               dont-complete)
-       (assoc n :dont-complete)))
-
-
 (defn- propagate-downstream!
   "Propagate values to reactives that are guaranteed to be downstream."
   [network pending-links downstream-rvts]
   (loop [n network
          rvts downstream-rvts]
-    (let [[rvtm remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
+    (let [[rvt-map remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
                                           (if (rvm r)
                                             [rvm (conj remaining [r vt])]
                                             [(assoc rvm r vt) remaining]))
                                         [{} []]
                                         rvts)]
-      (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvtm)))
-      (if (seq rvtm)
-        (recur (propagate! (allow-completion n rvtm) pending-links (deliver-values! rvtm))
+      (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvt-map)))
+      (if (seq rvt-map)
+        (recur (propagate! (allow-completion n rvt-map)
+                           pending-links
+                           (deliver-values! rvt-map))
                remaining-rvts)
         (dissoc n :unchanged?)))))
-
-
-(defn- pending-reactives
-  [{:keys [rid-map]}]
-  (->> rid-map keys (remove nil?) (filter pending?)))
 
 
 (defn update-and-propagate!
@@ -711,15 +718,14 @@
   Returns the network."
   [network rvt-map]
   (dump "= UPDATE-AND-PROPAGATE" (:label (ffirst rvt-map)))
-  (loop [c   100
-         n   (propagate! (allow-completion network rvt-map)
+  (loop [n   (propagate! (allow-completion network rvt-map)
                          (deliver-values! rvt-map))
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))
           next-prs    (pending-reactives next-n)]
-      (if (and (> c 0) progress? (seq next-prs))
-        (recur (dec c) next-n next-prs)
+      (if (and progress? (seq next-prs))
+        (recur next-n next-prs)
         next-n))))
 
 
@@ -729,6 +735,10 @@
   [n reactive]
   (deliver! reactive [::completed (now)])
   (update-and-propagate! n nil))
+
+
+;; ---------------------------------------------------------------------------
+;; Netref related functions
 
 
 (defn push!
@@ -752,11 +762,6 @@
   ([netref reactive]
      (update netref complete-and-propagate! [reactive])
      ::completed))
-
-
-
-;; ---------------------------------------------------------------------------
-;; Netref related functions
 
 
 (defn add-links!
@@ -795,7 +800,6 @@
      ~@exprs))
 
 
-
 ;; ---------------------------------------------------------------------------
 ;; Tools for implementing Link functions
 
@@ -828,7 +832,8 @@
 
 (defn make-exec-link-fn
   "Takes a function and wraps it's execution in an executors execute.
-  Any result will be pushed asynchronously to the network."
+  Any result will be pushed asynchronously to the network.
+  Returns a link function."
   ([executor f]
      (make-exec-link-fn f make-result-map))
   ([executor f result-fn]
@@ -849,7 +854,7 @@
 (defn make-sync-link-fn
   "Takes a function and wraps it's execution so that exceptions are
   caught and the return value is properly assigned to all output
-  reactives."
+  reactives. Returns a link function."
   ([f]
      (make-sync-link-fn f make-result-map))
   ([f result-fn]
@@ -859,19 +864,20 @@
 
 
 (defn fn-spec?
+  "Returns true if f is either function or a map containing a function
+  in an :f entry."
   [f]
   (or (instance? clojure.lang.IFn f)
       (and (map? f) (instance? clojure.lang.IFn (:f f)))))
 
 
-(defn async-exec?
-  [{:keys [f executor]}]
-  (and f executor))
-
 
 (defn unpack-fn
+  "Returns a pair of two functions. First is a factory [Lift-Fn
+  Make-Result-Fn -> Link-Fn] that creates a link function. Second is
+  an arbitrary function that is lifted by the factory."
   [{:keys [f executor] :as fn-spec}]
-  (if (async-exec? fn-spec)
+  (if (and f executor)
     [(partial make-exec-link-fn executor) f]
     [make-sync-link-fn fn-spec]))
 
