@@ -27,7 +27,6 @@
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 ;; - Implement unsubscribe
 ;; - Implement empty
-;; - Implement repeat
 ;; - Is cycle useful?
 ;; - Implement proper error handling:
 ;; - It should support features like 'return', 'retry', 'resume', 'ignore'
@@ -482,6 +481,22 @@
                                                      ex)))))))
 
 
+(defn flatmap
+  [f reactive]
+  {:pre [(fn-spec? f) (reactive? reactive)]
+   :post [(reactive? %)]}
+  (let [[make-link-fn f] (unpack-fn f)
+        new-r    (eventstream "flatmap")
+        state    (atom (make-reactive-queue new-r)) ]
+    (add-links! *netref* (make-link "flatmap" [reactive] [new-r]
+                                   :link-fn
+                                   (fn [{:keys [input-rvts] :as input}]
+                                     (let [r (f (fvalue input-rvts))]
+                                       (c/swap! state enqueue-reactive state r)))
+                                   :complete-on-remove [new-r]))
+    new-r))
+
+
 (defn hold
   [reactive]
   {:pre [(reactive? reactive)]
@@ -505,22 +520,6 @@
     (derive-new eventstream "map" reactives
                 :link-fn
                 (make-link-fn f make-result-map))))
-
-
-(defn mapcat'
-  [f reactive]
-  {:pre [(fn-spec? f) (reactive? reactive)]
-   :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)
-        new-r    (eventstream "mapcat'")
-        state    (atom (make-reactive-queue new-r)) ]
-    (add-links! *netref* (make-link "mapcat'" [reactive] []
-                                   :link-fn
-                                   (fn [{:keys [input-rvts] :as input}]
-                                     (let [r (f (fvalue input-rvts))]
-                                       (c/swap! state enqueue-reactive state r)))
-                                   :complete-on-remove [new-r]))
-    new-r))
 
 
 (defn mapcat

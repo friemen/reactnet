@@ -459,10 +459,10 @@
   the :pending-completions set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
   [{:keys [pending-completions dont-complete] :as n}]
-  (dump "= COMPLETE-PENDING WITHOUT" (s/join ", " (map (fn [[r c]] (str (:label r) " " c)) dont-complete)))
+  #_ (dump "= COMPLETE-PENDING WITHOUT" (s/join ", " (map (fn [[r c]] (str (:label r) " " c)) dont-complete)))
   (doseq [r (->> pending-completions
                  (remove dont-complete))]
-    (dump "PUSH COMPLETED" (:label r))
+    #_ (dump "PUSH COMPLETED" (:label r))
     (push! r ::completed))
   (assoc n
     :pending-completions
@@ -476,7 +476,7 @@
   networks :dont-complete map and removes reactives if completion is
   allowed again.  Returns an updated network."
   [{:keys [dont-complete] :as n} rvt-map]
-  (dump "= ALLOW COMPLETION" (->> rvt-map keys (map :label)))
+  #_ (dump "= ALLOW COMPLETION" (->> rvt-map keys (map :label)))
   (->> rvt-map
        (reduce (fn [m [r _]]
                  (let [c (or (some-> r m dec) 0)]
@@ -491,7 +491,7 @@
   "Removes links specified by the predicate or set and conjoins links
   to the networks links. Returns a new, rebuilded network."
   [{:keys [links] :as n} remove-by-pred new-links]
-  (dump "= UPDATE-LINKS")
+  #_ (dump "= UPDATE-LINKS")
   (let [links-to-remove (filter remove-by-pred links)
         remaining-links (remove remove-by-pred links)]
     (when (seq links-to-remove)
@@ -694,7 +694,7 @@
                                             [(assoc rvm r vt) remaining]))
                                         [{} []]
                                         rvts)]
-      (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvt-map)))
+      #_ (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvt-map)))
       (if (seq rvt-map)
         (recur (propagate! (allow-completion n rvt-map)
                            pending-links
@@ -708,7 +708,7 @@
   and runs propagation cycles as long as values are consumed. 
   Returns the network."
   [network rvt-map]
-  (dump "= UPDATE-AND-PROPAGATE" (:label (ffirst rvt-map)))
+  #_ (dump "= UPDATE-AND-PROPAGATE" (:label (ffirst rvt-map)))
   (loop [n   (propagate! (allow-completion network rvt-map)
                          (deliver-values! rvt-map))
          prs (pending-reactives n)]

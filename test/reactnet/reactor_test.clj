@@ -283,6 +283,16 @@
     (is (= [1 3 5 7 9] @r))))
 
 
+(deftest flatmap-test
+  (let [r       (atom [])
+        values  (range 5)
+        f       (fn [x] (->> x r/just (r/map (partial * 2)) (r/map (partial + 1))))
+        e1      (r/eventstream "e1")
+        c       (->> e1 (r/flatmap f) (r/scan + 0) (r/swap! r conj))]
+    (apply push-and-wait! (interleave (repeat e1) values))
+    (is (= [1 4 9 16 25] @r))))
+
+
 (deftest into-test
   (let [e  (r/eventstream "e")
         b1 (r/behavior "b1")
