@@ -120,7 +120,7 @@
 ;; ---------------------------------------------------------------------------
 ;; Misc utilities
 
-(defn dissect
+(defn ^:no-doc dissect
   "Returns a pair of vectors, first vector contains the xs for
   which (pred x) returns true, second vector the other xs."
   [pred xs]
@@ -135,7 +135,7 @@
 ;; Functions that operate on reactives.
 
 (defn reactive?
-  "Returns true if the r satisfies IReactive."
+  "Returns true if r satisfies IReactive."
   [r]
   (satisfies? IReactive r))
 
@@ -718,10 +718,10 @@
         (dissoc n :unchanged?)))))
 
 
-(defn ^:no-doc update-and-propagate!
+(defn update-and-propagate!
   "Updates network with the contents of the stimulus map,
-  delivers any values and runs propagation cycles as long as values
-  are consumed.  Returns the network."
+  delivers any values and runs propagation cycles as link-functions
+  return non-empty results.  Returns the network."
   [network {:keys [results add remove-by rvt-map]}]
   (loop [n   (-> network
                  (update-from-results results)
@@ -882,7 +882,6 @@
   [f]
   (or (instance? clojure.lang.IFn f)
       (and (map? f) (instance? clojure.lang.IFn (:f f)))))
-
 
 
 (defn unpack-fn

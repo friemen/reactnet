@@ -2,7 +2,6 @@
   "Default INetworkRef implementations: Agent and Atom based."
   (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate!]]))
 
-;; put this into it's own ns
 
 (defn- sleep-if-necessary
   "Puts the current thread to sleep if the queue of pending agent
@@ -18,7 +17,8 @@
     (sleep-if-necessary n-agent 1000 100)
     (send-off n-agent (fn [n]
                         (binding [*netref* this]
-                          (update-and-propagate! n stimulus)))))
+                          (update-and-propagate! n stimulus))))
+    this)
   (network [this]
     @n-agent))
 
@@ -35,7 +35,8 @@
   (enq [this stimulus]
     (binding [*netref* this]
       (swap! n-atom (fn [n]
-                      (update-and-propagate! n stimulus)))))
+                      (update-and-propagate! n stimulus)))
+      this))
   (network [this]
     @n-atom))
 

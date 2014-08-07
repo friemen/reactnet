@@ -4,6 +4,8 @@ Consistent value propagation through a network of reactives.
 
 [![Build Status](https://travis-ci.org/friemen/reactnet.png?branch=master)](https://travis-ci.org/friemen/reactnet)
 
+[API docs](https://friemen.github.com/reactnet)
+
 The goal is a core for a reactive library that is designed to avoid
 inconsistencies and bouncing effects and gracefully handles infinite
 loops caused by cyclic dependencies.
@@ -11,7 +13,20 @@ loops caused by cyclic dependencies.
 It will be the core of a [reactor](https://github.com/friemen/reactor)
 re-implementation.
 
-[API docs](https://friemen.github.com/reactnet)
+Key ideas of reactnet are:
+* The network is formed solely by links that point to reactives. There
+  is no Observer or callback mechanism involved.
+* Updates to the network (add / remove links) or propagations of
+  events are enqueued and processed sequentially in a separate
+  thread.
+* To avoid blocking the propagation thread links can invoke functions
+  asynchronously.
+* Value propagation is done along the topological order of reactives
+  and links.
+* There can be many independent networks, processed by independant
+  threads.
+
+
 
 ## Introduction
 
@@ -458,7 +473,7 @@ values by invoking `next-value` on each input reactive. Only after
 evaluation the values are actually consumed by invoking `consume!` on
 each reactive. The value of a reactive is NOT consumed if all links
 depending on it return a truthy value for `:no-consume`. This enables
-link-functions to reject a value after they examined it, a
+link-functions to reject a value after they examined it, an
 implementation like `take-while` is a good example where this is
 required.
 
@@ -480,7 +495,7 @@ function.
 
 The complete function is invoked whenever the completion of an input
 reactive is detected. It is supposed to return a Result map where it
-can set one of the following entries:
+can set any of the following entries:
 
 ```
   :output-rvts         A seq of RVTs
@@ -488,6 +503,15 @@ can set one of the following entries:
   :remove-by           An unary predicate that matches links to be
                        removed from the network
 ```
+
+
+## Examples
+
+TODO Show some implementations of reactor
+
+* derive-new
+* Asynchronous function invocation: delay
+* Stateful links: distinct
 
 
 ## How it works
@@ -542,7 +566,7 @@ case the loop is terminated.
 
 ### Automatic link removal and completion
 
-A link with at least one completed input or no un-completed output is
+A link with at least one completed input or only completed outputs is
 useless. It's called *dead* and will automatically be removed in
 `(update-from-results network results)`. Links point via
 `:complete-on-remove` key to those reactives that will not receive any

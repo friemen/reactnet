@@ -59,6 +59,11 @@
                 (atom true))))
 
 
+(defn behavior?
+  [reactive]
+  (instance? Behavior reactive))
+
+
 (defn eventstream
   [label]
   (Eventstream. label
@@ -73,11 +78,6 @@
   [reactive]
   (or (instance? Eventstream reactive)
       (instance? Seqstream reactive)))
-
-
-(defn behavior?
-  [reactive]
-  (instance? Behavior reactive))
 
 
 ;; ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@
 (defn- sample-fn
   "If passed a function returns it wrapped in an exception handler.
   If passed a IDeref (atom, agent, behavior, ...) returns a function that derefs it.
-  If passed any other value return a function that always returns it."
+  If passed any other value return (constantly value)."
   [f-or-ref-or-value]
   (cond
    (fn? f-or-ref-or-value)
