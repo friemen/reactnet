@@ -338,6 +338,17 @@ A map containing the following entries
 
 `rid` is a reactive identifier, an integer which is unique within a network.
 
+### Stimulus
+A map containing data that is passed to enq/update-and-propagate! to
+start an update/propagation cycle of a network.
+
+```
+  :results             A seq of Result maps
+  :remove-by           A predicate matching links to remove from the network
+  :add                 A seq of links to add to the network
+  :rvt-map             A map {Reactive -> [v t]} of values to propagate
+```
+
 
 ### Network Reference
 Serves as abstraction of how the network is stored and
@@ -345,11 +356,14 @@ propagation/updates to it are enqueued.
 
 ```clojure
 (defprotocol INetworkRef
-  (update [netref f args]
-    "Apply f to the current network state (as first arg) and the
-    arguments given in the args vector.")
+  (enq [netref stimulus]
+    "Enqueue a new update/propagation cycle that will process a seq of
+    result maps, remove links, which match the remove-by predicate, add
+    new links and propagate the values in the {Reactive -> [v t]} map.
+    An implementation should delegate to update-and-propagate!
+    function.")
   (network [netref]
-    "Return the network state."))
+    "Return the network map."))
 ```
 
 ## Creating links

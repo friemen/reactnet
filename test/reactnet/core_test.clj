@@ -77,7 +77,7 @@
       (rn/add-links! rn/*netref* (rn/make-link "e1->e2" [e1] [e2]))
       (is (= 1 (-> rn/*netref* rn/network :links count))))
     (System/gc)
-    (rn/update rn/*netref* rn/update-and-propagate! [nil])
+    (rn/enq rn/*netref* {})
     (is (= 0 (-> rn/*netref* rn/network :links count)))))
 
 

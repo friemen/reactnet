@@ -10,10 +10,10 @@
             [reactnet.executors]
             [reactnet.core :as rn
              :refer [add-links! broadcast-value completed? default-link-fn
-                     enqueue-values execute fvalue fn-spec? link-inputs
+                     enq enqueue-values execute fvalue fn-spec? link-inputs
                      link-outputs make-link make-network make-result-map
                      make-sync-link-fn *netref* now reactive? remove-links!
-                     single-value update unpack-fn values zip-values]
+                     single-value unpack-fn values zip-values]
              :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
@@ -99,7 +99,6 @@
 (defn reset-network!
   []
   (sched/cancel-all scheduler)
-  (update *netref* #(assoc % :dont-complete {}) [])
   (remove-links! *netref* (constantly true))
   :reset)
 

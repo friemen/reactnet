@@ -89,20 +89,47 @@
 ;;                        as soon as they are not contained in the
 ;;                        :dont-complete map
 
+;; Stimulus
+;; A map containing data that is passed to enq/update-and-propagate! to
+;; start an update/propagation cycle of a network.
+;;   :results             A seq of Result maps
+;;   :remove-by           A predicate matching links to remove from the network
+;;   :add                 A seq of links to add to the network
+;;   :rvt-map             A map {Reactive -> [v t]} of values to propagate
+
 ;; NetworkRef:
 ;; Serves as abstraction of how the network is stored and
 ;; propagation/updates to it are scheduled.
 
 (defprotocol INetworkRef
-  (update [netref f args]
-    "Apply f to the current network map (as first arg of f) and the
-    arguments given in the args vector.")
+  (enq [netref stimulus]
+    "Enqueue a new update/propagation cycle that will process a seq of
+  result maps, remove links, which match the remove-by predicate, add
+  new links and propagate the values in the {Reactive -> [v t]} map.
+
+  An implementation should delegate to update-and-propagate!
+  function.")
   (network [netref]
     "Return the network map."))
 
 
 
 (def ^:dynamic *netref* "A reference to a default network." nil)
+
+
+;; ---------------------------------------------------------------------------
+;; Misc utilities
+
+(defn dissect
+  "Returns a pair of vectors, first vector contains the xs for
+  which (pred x) returns true, second vector the other xs."
+  [pred xs]
+  (reduce (fn [[txs fxs] x]
+            (if (pred x)
+              [(conj txs x) fxs]
+              [txs (conj fxs x)]))
+          [[] []]
+          xs))
 
 ;; ---------------------------------------------------------------------------
 ;; Functions that operate on reactives.
@@ -139,7 +166,7 @@
 ;; Functions to produce RVT seqs
 
 
-(defn ^:no-doc now
+(defn now
   "Returns the current epoch time in milliseconds."
   []
   (System/currentTimeMillis))
@@ -459,26 +486,19 @@
   the :pending-completions set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
   [{:keys [pending-completions dont-complete] :as n}]
-  #_ (dump "= COMPLETE-PENDING WITHOUT" (s/join ", " (map (fn [[r c]] (str (:label r) " " c)) dont-complete)))
-  (doseq [r (->> pending-completions
-                 (remove dont-complete))]
-    #_ (dump "PUSH COMPLETED" (:label r))
-    (push! r ::completed))
-  (assoc n
-    :pending-completions
-    (->> pending-completions
-         (filter dont-complete)
-         set)))
+  (let [[remaining completables] (dissect dont-complete pending-completions)]
+    (doseq [r completables]
+      (push! r ::completed))
+    (assoc n :pending-completions (set remaining))))
 
 
 (defn- allow-completion
   "Decreases the pending evaluations counter in
   networks :dont-complete map and removes reactives if completion is
   allowed again.  Returns an updated network."
-  [{:keys [dont-complete] :as n} rvt-map]
-  #_ (dump "= ALLOW COMPLETION" (->> rvt-map keys (map :label)))
-  (->> rvt-map
-       (reduce (fn [m [r _]]
+  [{:keys [dont-complete] :as n} rs]
+  (->> rs
+       (reduce (fn [m r]
                  (let [c (or (some-> r m dec) 0)]
                    (if (> c 0)
                      (assoc m r c)
@@ -491,9 +511,7 @@
   "Removes links specified by the predicate or set and conjoins links
   to the networks links. Returns a new, rebuilded network."
   [{:keys [links] :as n} remove-by-pred new-links]
-  #_ (dump "= UPDATE-LINKS")
-  (let [links-to-remove (filter remove-by-pred links)
-        remaining-links (remove remove-by-pred links)]
+  (let [[links-to-remove remaining-links] (dissect remove-by-pred links)]
     (when (seq links-to-remove)
       (dump-links "REMOVE" links-to-remove))
     (when (seq new-links)
@@ -640,10 +658,8 @@
                                 doall)
            level           (or (-> available-links first :level) 0)
            same-level?     (fn [l] (= (:level l) level))
-           current-links   (->> available-links
-                                (filter same-level?))
-           pending-links   (->> available-links
-                                (remove same-level?))
+           [current-links
+            pending-links] (dissect same-level? available-links)
            
            rvt-map         (->> current-links
                                 (mapcat link-inputs)
@@ -689,14 +705,13 @@
   (loop [n network
          rvts downstream-rvts]
     (let [[rvt-map remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
-                                          (if (rvm r)
-                                            [rvm (conj remaining [r vt])]
-                                            [(assoc rvm r vt) remaining]))
-                                        [{} []]
-                                        rvts)]
-      #_ (dump "= PROPAGATE-DOWNSTREAM" (:label (ffirst rvt-map)))
+                                             (if (rvm r)
+                                               [rvm (conj remaining [r vt])]
+                                               [(assoc rvm r vt) remaining]))
+                                           [{} []]
+                                           rvts)]
       (if (seq rvt-map)
-        (recur (propagate! (allow-completion n rvt-map)
+        (recur (propagate! (allow-completion n (keys rvt-map))
                            pending-links
                            (deliver-values! rvt-map))
                remaining-rvts)
@@ -704,13 +719,18 @@
 
 
 (defn ^:no-doc update-and-propagate!
-  "Updates reactives with the contents of the reactive-values map,
-  and runs propagation cycles as long as values are consumed. 
-  Returns the network."
-  [network rvt-map]
-  #_ (dump "= UPDATE-AND-PROPAGATE" (:label (ffirst rvt-map)))
-  (loop [n   (propagate! (allow-completion network rvt-map)
-                         (deliver-values! rvt-map))
+  "Updates network with the contents of the stimulus map,
+  delivers any values and runs propagation cycles as long as values
+  are consumed.  Returns the network."
+  [network {:keys [results add remove-by rvt-map]}]
+  (loop [n   (-> network
+                 (update-from-results results)
+                 (update-links (or remove-by #{}) add)
+                 (allow-completion (->> rvt-map
+                                        (filter (fn [[r [v t]]]
+                                                  (not= ::completed v)))
+                                        (map first)))
+                 (propagate! (deliver-values! rvt-map)))   
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))
@@ -718,14 +738,6 @@
       (if (and progress? (seq next-prs))
         (recur next-n next-prs)
         next-n))))
-
-
-(defn ^:no-doc complete-and-propagate!
-  "Takes a network and a reactive, delivers the ::completed value into
-  the reactive and returns an updated network."
-  [n r]
-  (deliver! r [::completed (now)])
-  (update-and-propagate! n nil))
 
 
 ;; ---------------------------------------------------------------------------
@@ -740,7 +752,7 @@
   ([netref r v]
      (push! netref r v (now)))
   ([netref r v t]
-     (update netref update-and-propagate! [{r [v t]}])
+     (enq netref {:rvt-map {r [v t]}})
      v))
 
 
@@ -752,22 +764,20 @@
   ([r]
      (complete! *netref* r))
   ([netref r]
-     (update netref complete-and-propagate! [r])
+     (enq netref {:rvt-map {r [::completed (now)]}})
      ::completed))
 
 
 (defn add-links!
   "Adds links to the network. Returns the network ref."
   [netref & links]
-  (update netref update-links [#{} links])
-  (update netref update-and-propagate! [nil]))
+  (enq netref {:add links}))
 
 
 (defn remove-links!
   "Removes links from the network. Returns the network ref."
   [netref pred]
-  (update netref update-links [pred []])
-  (update netref update-and-propagate! [nil]))
+  (enq netref {:remove-by pred}))
 
 
 (defn pp
@@ -841,10 +851,10 @@
                     (let [[v ex]      (safely-apply f (values input-rvts))
                           result-map  (result-fn input v ex)]
                       ;; send changes / values to netref
-                      (when (or (seq (:add result-map)) (:remove-by result-map))
-                        (update netref update-from-results [[result-map]]))
-                      (doseq [[r [v t]] (:output-rvts result-map)]
-                        (push! r v)))))
+                      (when (or (seq (:add result-map))
+                                (:remove-by result-map)
+                                (seq (:output-rvts result-map)))
+                        (enq netref {:results [result-map]})))))
          nil))))
 
 

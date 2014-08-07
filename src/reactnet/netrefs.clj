@@ -1,6 +1,6 @@
 (ns reactnet.netrefs
   "Default INetworkRef implementations: Agent and Atom based."
-  (:require [reactnet.core :refer [INetworkRef *netref*]]))
+  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate!]]))
 
 ;; put this into it's own ns
 
@@ -14,11 +14,11 @@
 
 (defrecord AgentNetref [n-agent]
   INetworkRef
-  (update [this f args]
+  (enq [this stimulus]
     (sleep-if-necessary n-agent 1000 100)
     (send-off n-agent (fn [n]
                         (binding [*netref* this]
-                          (apply (partial f n) args)))))
+                          (update-and-propagate! n stimulus)))))
   (network [this]
     @n-agent))
 
@@ -32,10 +32,10 @@
 
 (defrecord AtomNetref [n-atom]
   INetworkRef
-  (update [this f args]
+  (enq [this stimulus]
     (binding [*netref* this]
       (swap! n-atom (fn [n]
-                      (apply (partial f n) args)))))
+                      (update-and-propagate! n stimulus)))))
   (network [this]
     @n-atom))
 
