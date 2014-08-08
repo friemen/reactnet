@@ -88,6 +88,7 @@
 ;;   :pending-completions A seq of reactives that will receive ::completed
 ;;                        as soon as they are not contained in the
 ;;                        :dont-complete map
+;;   :rebuild?            Flag if links have been added/removed
 
 ;; Stimulus
 ;; A map containing data that is passed to enq/update-and-propagate! to
@@ -103,9 +104,12 @@
 
 (defprotocol INetworkRef
   (enq [netref stimulus]
-    "Enqueue a new update/propagation cycle that will process a seq of
-  result maps, remove links, which match the remove-by predicate, add
-  new links and propagate the values in the {Reactive -> [v t]} map.
+    "Enqueue a new update/propagation cycle that will process a
+  stimulus containing a seq of result maps, remove links by predicate,
+  add new links and propagate the values in the {Reactive -> [v t]}
+  map.
+
+  Returns the netref.
 
   An implementation should delegate to update-and-propagate!
   function.")
@@ -145,13 +149,13 @@
 
 
 (defn value
-  "Extract the value from an RVT."
+  "Returns the value from an RVT."
   [[r [v t]]]
   v)
 
 
 (defn fvalue
-  "Extracts the value from the first item of an RVT seq."
+  "Returns the value from the first item of an RVT seq."
   [rvts]
   (-> rvts first value))
 
@@ -173,7 +177,7 @@
 
 
 (defn single-value
-  "Produces a sequence with exactly one RVT pair assigned to Reactive
+  "Returns a sequence with exactly one RVT pair assigned to reactive
   r."
   [v r]
   {:pre [(reactive? r)]}
@@ -181,7 +185,7 @@
 
 
 (defn broadcast-value
-  "Produces a RVT seq where the value v is assigned to every Reactive
+  "Returns an RVT seq where the value v is assigned to every reactive
   in rs."
   [v rs]
   {:pre [(every? reactive? rs)]}
@@ -190,7 +194,7 @@
 
 
 (defn zip-values
-  "Produces an RVT seq where values are position-wise assigned to
+  "Returns an RVT seq where values are position-wise assigned to
   reactives."
   [vs rs]
   {:pre [(every? reactive? rs)]}
@@ -199,8 +203,8 @@
 
 
 (defn enqueue-values
-  "Produces an RVT seq where all values in vs are assigned to the same
-  Reactive r."
+  "Returns an RVT seq where all values in vs are assigned to the same
+  reactive r."
   [vs r]
   {:pre [(reactive? r)]}
   (let [t (now)]
@@ -240,7 +244,7 @@
 
 
 (defn default-link-fn
-  "Pass thru of inputs to outputs.
+  "A link-function that implements a pass-through of inputs to outputs.
   If there is more than one input reactive, zips values of all inputs
   into a vector, otherwise takes the single value.  Returns a Result
   map with the extracted value assigned to all output reactives."
@@ -253,8 +257,10 @@
 
 
 (defn make-link
-  "Creates a new Link. Label is an arbitrary text, inputs and outputs
-  are sequences of reactives. 
+  "Creates and returns a new Link map. 
+
+  Label is an arbitrary text, inputs and outputs are sequences of
+  reactives.
 
   Output reactives are kept using WeakReferences.
   
@@ -465,8 +471,8 @@
 
 (defn- rebuild
   "Takes a network and a set of links and re-calculates rid-map,
-  links-map and level-map. Preserves other existing entries. Returns a
-  new network."
+  links-map and level-map. Preserves other existing entries. Returns an
+  updated network."
   [{:keys [id] :as n} links]
   (let [rid-map       (reactive-rid-map links)
         level-map     (rid-level-map rid-map links)
@@ -475,10 +481,27 @@
       :rid-map rid-map
       :links leveled-links
       :links-map (rid-links-map rid-map leveled-links)
-      :level-map level-map)))
+      :level-map level-map
+      :rebuild? false)))
 
 
-(declare push!)
+(defn- rebuild-if-necessary
+  "Takes a network n, returns an updated network if :rebuild? is
+  truthy, else returns n."
+  [{:keys [links rebuild?] :as n}]
+  (if rebuild?
+    (rebuild n links)
+    n))
+
+
+(defn- apply-exec
+  "Takes a network and a seq where the first item is a function f and
+  the other items are arguments. Invokes (f n arg1 arg2 ...). f must
+  return a network. Omits invocation of f if it is nil."
+  [n [f & args]]
+  (if f
+    (apply (partial f n) args)
+    n))
 
 
 (defn- complete-pending
@@ -488,7 +511,7 @@
   [{:keys [pending-completions dont-complete] :as n}]
   (let [[remaining completables] (dissect dont-complete pending-completions)]
     (doseq [r completables]
-      (push! r ::completed))
+      (enq *netref* {:rvt-map {r [::completed (now)]}}))
     (assoc n :pending-completions (set remaining))))
 
 
@@ -509,7 +532,8 @@
 
 (defn ^:no-doc update-links
   "Removes links specified by the predicate or set and conjoins links
-  to the networks links. Returns a new, rebuilded network."
+  to the networks links. Returns an updated network, and flags
+  with :rebuild? if a rebuild is necessary."
   [{:keys [links] :as n} remove-by-pred new-links]
   (let [[links-to-remove remaining-links] (dissect remove-by-pred links)]
     (when (seq links-to-remove)
@@ -519,14 +543,15 @@
     (-> n
         (update-in [:pending-completions] concat (->> links-to-remove
                                                       (mapcat :complete-on-remove)))
-        (rebuild (concat remaining-links new-links))
-        complete-pending)))
+        (assoc
+            :links (concat remaining-links new-links)
+            :rebuild? (or (seq links-to-remove) (seq new-links))))))
 
 
 (defn ^:no-doc update-from-results
-  "Takes a network and a seq of result maps and returns an updated
-  network, with links added and removed. Completes reactives
-  referenced by removed links :complete-on-remove seq."
+  "Takes a network and a seq of result maps and adds / removes links.
+  Returns an updated network, and flags with :rebuild? if a rebuild is
+  necessary."
   [{:keys [links dont-complete] :as n} results]
   (let [dont-complete   (->> results
                              (mapcat :dont-complete)
@@ -543,10 +568,19 @@
                                             (into ls)))
                                      #{}))
         links-to-add    (->> results (mapcat :add) set)]
-    #_ (dump "- DON'T COMPLETE" (map (fn [[r c]] (str (:label r) " " c "  ")) dont-complete))
     (-> n
         (assoc :dont-complete dont-complete)
         (update-links links-to-remove links-to-add))))
+
+
+(defn replace-link-error-fn
+  "Match the first link by pred, attach the error-fn and replace the
+  link. Returns an updated network."
+  [{:keys [id links] :as n} pred error-fn]
+  (let [[matched others] (dissect pred links)]
+    (assoc n
+      :links (conj others (assoc (first matched) :error-fn error-fn))
+      :rebuild? (seq matched))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -677,7 +711,10 @@
            unchanged?      (->> results (remove :no-consume) empty?)
            
            ;; apply network changes returned by link and complete functions
-           network         (update-from-results network results)
+           network         (-> network
+                               (update-from-results results)
+                               complete-pending
+                               rebuild-if-necessary) 
            
            all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
@@ -691,7 +728,7 @@
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
        (doseq [[r [v t]] upstream-rvts]
-         (push! *netref* r v t))
+         (enq *netref* {:rvt-map {r [v t]}}))
        (if unchanged?
          (assoc network :unchanged? true)
          (propagate-downstream! network
@@ -722,14 +759,17 @@
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [network {:keys [results add remove-by rvt-map]}]
+  [network {:keys [exec results add remove-by rvt-map]}]
   (loop [n   (-> network
+                 (apply-exec exec)
                  (update-from-results results)
                  (update-links (or remove-by #{}) add)
+                 (rebuild-if-necessary)
                  (allow-completion (->> rvt-map
                                         (filter (fn [[r [v t]]]
                                                   (not= ::completed v)))
                                         (map first)))
+                 (complete-pending)
                  (propagate! (deliver-values! rvt-map)))   
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
@@ -780,6 +820,18 @@
   (enq netref {:remove-by pred}))
 
 
+(defn reset-network!
+  "Removes all links and clears any other data from the network. 
+  Returns :reset."
+  [netref]
+  (enq netref {:exec [(fn [n]
+                        (rebuild (assoc n
+                                   :dont-complete {}
+                                   :pending-completions [])
+                                 []))]})
+  :reset)
+
+
 (defn pp
   "Pretty print network in netref."
   ([]
@@ -815,7 +867,7 @@
   Returns a pair of [result exception], at least one of them being nil."
   [f xs]
   (try [(apply f xs) nil]
-       (catch Exception ex (do (.printStackTrace ex) [nil ex]))))
+       (catch Exception ex [nil ex])))
 
 
 (defn make-result-map

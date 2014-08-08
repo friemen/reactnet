@@ -13,7 +13,8 @@
                      enq enqueue-values execute fvalue fn-spec? link-inputs
                      link-outputs make-link make-network make-result-map
                      make-sync-link-fn *netref* now reactive? remove-links!
-                     single-value unpack-fn values zip-values]
+                     replace-link-error-fn single-value unpack-fn values
+                     zip-values]
              :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
@@ -99,8 +100,7 @@
 (defn reset-network!
   []
   (sched/cancel-all scheduler)
-  (remove-links! *netref* (constantly true))
-  :reset)
+  (rn/reset-network! *netref*))
 
 
 ;; ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Some combinators
+;; Common combinators
 
 
 (declare match)
@@ -811,6 +811,18 @@
   [[_ & exprs]]
   `(lift-fn or-f ~@(lift-exprs exprs)))
 
+
+;; ---------------------------------------------------------------------------
+;; Error handling
+
+
+(defn err-ignore
+  [reactive]
+  (enq *netref* {:exec [replace-link-error-fn
+                        (fn [l]
+                          (= (link-outputs l) [reactive]))
+                        (fn [result] {})]})
+  reactive)
 
 ;; ---------------------------------------------------------------------------
 ;; Async execution

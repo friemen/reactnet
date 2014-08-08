@@ -516,3 +516,20 @@
     (is (not @z))
     (push-and-wait! y 1)
     (is @z)))
+
+
+;; ---------------------------------------------------------------------------
+;; Tests of error handling
+
+
+(deftest err-ignore-test
+  (let [r (atom [])
+        e (r/eventstream "e")
+        c (->> e
+               (r/map #(if (= 42 %)
+                         (throw (IllegalArgumentException. (str %)))
+                         %))
+               r/err-ignore
+               (r/swap! r conj))]
+    (push-and-wait! e 1 e 2 e 42 e 3)
+    (is (= [1 2 3] @r))))

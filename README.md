@@ -349,6 +349,7 @@ A map containing the following entries
   :pending-completions A seq of reactives that will receive ::completed
                        as soon as they are not contained in the
 					   :dont-complete map
+  :rebuild?            Flag if links have been added/removed
 ```
 
 `rid` is a reactive identifier, an integer which is unique within a network.

@@ -5,7 +5,7 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.6.0"]]
   :plugins [[codox "0.8.10"]]
-  :codox {:defaults {:doc/format :markdown}
+  :codox {:defaults {}
           :sources ["src"]
           :exclude [reactnet.example reactnet.ex-swing reactnet.ex-services]
           :src-dir-uri "https://github.com/friemen/reactnet/blob/master/"
