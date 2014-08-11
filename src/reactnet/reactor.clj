@@ -24,9 +24,6 @@
 ;; - Remove the mandatory label from the behavior/eventstream factories
 ;; - How to prevent scheduled tasks from accumulating?
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
-;; - Implement unsubscribe
-;; - Implement empty
-
 
 
 ;; ===========================================================================
@@ -686,14 +683,17 @@
 
 
 (defn subscribe
-  [f reactive]
-  {:pre [(fn-spec? f) (reactive? reactive)]
-   :post [(reactive? %)]}
-  (let [[executor f] (unpack-fn-spec f)]
-    (add-links! *netref* (make-link "subscriber" [reactive] []
-                                    :link-fn (make-link-fn f (constantly {}))
-                                    :executor executor))
-    reactive))
+  ([f reactive]
+     (subscribe (gensym "subscriber") f reactive))
+  ([key f reactive]
+     {:pre [(fn-spec? f) (reactive? reactive)]
+      :post [(reactive? %)]}
+     (let [[executor f] (unpack-fn-spec f)]
+       (add-links! *netref* (assoc (make-link "subscriber" [reactive] []
+                                              :link-fn (make-link-fn f (constantly {}))
+                                              :executor executor)
+                              :subscriber-key key))
+       reactive)))
 
 
 (defn swap!
@@ -754,6 +754,12 @@
                        (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
     new-r))
 
+
+(defn unsubscribe
+  [key reactive]
+  (remove-links! *netref* #(and (= (:subscriber-key %) key)
+                                (= (link-inputs %) [reactive])))
+  reactive)
 
 
 ;; ---------------------------------------------------------------------------
@@ -891,6 +897,7 @@
                 (sched/once scheduler millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
                 {}))))
 
+
 (defn err-return
   [x reactive]
   (on-error *netref* reactive
@@ -906,6 +913,7 @@
               {:remove-by #(= (link-outputs %) [reactive])
                :add [(make-link "err" [reactive-after-error] [reactive]
                                 :link-fn default-link-fn)]})))
+
 
 (defn err-into
   [error-reactive reactive]

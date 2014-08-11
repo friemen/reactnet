@@ -448,6 +448,19 @@
       (is (= [[0 1 2 3 4] [5 6]] @r)))))
 
 
+(deftest unsubscribe-test
+  (let [r  (atom [])
+        e  (r/eventstream "e")
+        c  (->> e
+                (r/map inc)
+                (r/subscribe :s (partial swap! r conj)))]
+    (push-and-wait! e 1 e 2 e 3)
+    (is (= [2 3 4] @r))
+    (r/unsubscribe :s c)
+    (push-and-wait! e 1 e 2 e 3)
+    (is (= [2 3 4] @r))))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Tests for expression lifting
 
