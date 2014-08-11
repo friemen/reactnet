@@ -645,8 +645,7 @@
         accu         (atom initial-value)]
     (derive-new eventstream "scan" [r]
                 :link-fn
-                (make-link-fn (fn [v] (c/swap! accu f v))
-                              make-result-map))))
+                (make-link-fn #(c/swap! accu f %)))))
 
 
 (defn startwith

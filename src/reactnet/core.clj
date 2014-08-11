@@ -5,6 +5,7 @@
            [java.util WeakHashMap]))
 
 ;; TODOs
+;; - Proper logging instead of dump
 ;; - Preserve somehow the timestamp when applying a link function:
 ;;   Use the max timestamp of all input values.
 ;; - Add pause! and resume! for the netref
@@ -375,7 +376,7 @@
 ;; ---------------------------------------------------------------------------
 ;; Getting information about the reactive graph
 
-(defn ^:no-doc reactive-rid-map
+(defn- reactive-rid-map
   "Returns a WeakHashMap {Reactive -> rid} of all reactives that occur
   as inputs or outputs in links. rid is an integer value."
   [links]
@@ -389,7 +390,7 @@
     wm))
 
 
-(defn ^:no-doc rid-links-map
+(defn- rid-links-map
   "Returns a map {rid -> (Seq of links)}, where the reactive is
   an input of the links it points to."
   [rid-map links]
@@ -401,7 +402,7 @@
                {})))
 
 
-(defn ^:no-doc rid-followers-map
+(defn- rid-followers-map
   "Returns a map {rid -> (Set of following reactive ids)}."
   [rid-map links]
   (->> links
@@ -414,7 +415,7 @@
        (into {})))
 
 
-(defn ^:no-doc rid-level-map
+(defn- rid-level-map
   "Returns a map {rid/Link -> level} containing all reactive rids and
   links in the network, where level is an integer representing
   topological order, i.e. L(r1) < L(r2) => r1 is to be touched before
@@ -542,7 +543,7 @@
        (assoc n :dont-complete)))
 
 
-(defn ^:no-doc update-links
+(defn- update-links
   "Removes links specified by the predicate or set and conjoins links
   to the networks links. Returns an updated network, and flags
   with :rebuild? if a rebuild is necessary."
@@ -560,7 +561,7 @@
             :rebuild? (or (seq links-to-remove) (seq new-links))))))
 
 
-(defn ^:no-doc update-from-results
+(defn- update-from-results
   "Takes a network and a seq of result maps and adds / removes links.
   Returns an updated network, and flags with :rebuild? if a rebuild is
   necessary."
@@ -585,7 +586,7 @@
         (update-links links-to-remove links-to-add))))
 
 
-(defn ^:no-doc replace-link-error-fn
+(defn- replace-link-error-fn
   "Match the first link by pred, attach the error-fn and replace the
   link. Returns an updated network."
   [{:keys [id links] :as n} pred error-fn]
@@ -695,7 +696,7 @@
 (declare propagate-downstream!)
 
 
-(defn ^:no-doc propagate!
+(defn- propagate!
   "Executes one propagation cycle. Returns the network."
   ([network]
      (propagate! network [] []))
