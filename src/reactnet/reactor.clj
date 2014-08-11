@@ -51,7 +51,8 @@
 
 (defn behavior?
   [r]
-  (instance? Behavior r))
+  (or (instance? Behavior r)
+      (instance? Fnbehavior r)))
 
 
 (defn eventstream
@@ -272,6 +273,8 @@
 
 
 (defn fnbehavior
+  "Returns a behavior that evaluates function f whenever a value is
+  requested."
   [f]
   (assoc (Fnbehavior. f)
     :label (str f)))
@@ -279,6 +282,13 @@
 (declare seqstream)
 
 (defn just
+  "Returns an eventstream that evaluates x, provides the result and completes.
+
+  x can be: 
+  - an fn-spec with an arbitrary executor and a function f,
+  - a function that is executed synchronously, 
+  - an IDeref implementation, or 
+  - a value."
   [{:keys [executor f] :as x}]
   (let [new-r  (eventstream "just")
         f      (sample-fn (if (and executor f) f x))
@@ -292,17 +302,27 @@
 
 
 (defn sample
+  "Returns an eventstream that repeatedly evaluates x with a fixed period.
+
+  x can be: 
+  - an fn-spec with an arbitrary executor and a function f,
+  - a function that is executed synchronously, 
+  - an IDeref implementation, or 
+  - a value."
   [millis {:keys [executor f] :as x}]
   (let [netref  *netref*
         new-r   (eventstream "sample")
+        f       (sample-fn (if (and executor f) f x))
         task-f  (if (and executor f)
                   #(execute executor netref (fn [] (rn/push! netref new-r (f))))
-                  #(rn/push! netref new-r ((sample-fn x))))]
+                  #(rn/push! netref new-r (f)))]
     (sched/interval scheduler millis task-f)
     new-r))
 
 
 (defn seqstream
+  "Returns an eventstream that provides all values in collection xs
+  and then completes."
   [xs]
   (assoc (Seqstream. (atom {:seq (seq xs)
                             :last-occ nil})
@@ -311,6 +331,8 @@
 
 
 (defn timer
+  "Returns an eventstream that emits every millis milliseconds an
+  integer, starting with 0, incrementing it by 1."
   [millis]
   (let [ticks  (atom 0)
         new-r  (eventstream "timer")
@@ -329,6 +351,8 @@
 
 
 (defn amb
+  "Returns an eventstream that follows the first reactive from rs that
+  emits a value."
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
@@ -344,6 +368,8 @@
 
 
 (defn any
+  "Returns an eventstream that provides true as soon as there occurs one
+  truthy value in eventstream r."
   ([r]
      (any identity r))
   ([pred r]
@@ -351,13 +377,16 @@
 
 
 (defn buffer
-  [no millis r]  
-  {:pre [(number? no) (number? millis) (reactive? r)]
+  "Returns an eventstream that provides vectors of values. A non-empty
+  vector occurs either after millis millisseconds, or if n items are
+  available."
+  [n millis r]  
+  {:pre [(number? n) (number? millis) (reactive? r)]
    :post [(reactive? %)]}
   (let [b      (atom {:queue [] :dequeued nil})
         task   (atom nil)
         enq    (fn [{:keys [queue] :as q} x]
-                 (if (and (> no 0) (>= (c/count queue) no))
+                 (if (and (> n 0) (>= (c/count queue) n))
                    (assoc q :queue [x] :dequeued queue)
                    (assoc q :queue (conj queue x) :dequeued nil)))
         deq    (fn [{:keys [queue] :as q}]
@@ -387,16 +416,22 @@
                       {:output-rvts (single-value vs (-> link link-outputs first))}))))))
 
 (defn buffer-t
+  "Returns an eventstream thar provides vectors of values.
+  A non-empty vector occurs at most each millis milliseconds."
   [millis r]
   (buffer -1 millis r))
 
 
 (defn buffer-c
-  [no r]
-  (buffer no -1 r))
+  "Returns an eventstream thar provides vectors of values.
+  A non-empty vector occurs when n items are available."
+  [n r]
+  (buffer n -1 r))
 
 
 (defn changes
+  "Returns an eventstream that emits pairs of values [old new]
+  whenever the value of the underlying behavior changes."
   [behavior]
   {:pre [(behavior? behavior)]
    :post [(eventstream? %)]}
@@ -412,6 +447,9 @@
 
 
 (defn concat
+  "Returns an eventstream that emits the items of all reactives in
+  rs. It first emits items from the first reactive until it is
+  completed, then from the second and so on."
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
@@ -423,6 +461,8 @@
 
 
 (defn count
+  "Returns an eventstream that emits the number of items that were
+  emitted by r."
   [r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
@@ -434,6 +474,9 @@
 
 
 (defn debounce
+  "Returns an eventstream that emits an item of r not before millis
+  milliseconds have passed. If a new item is emitted by r before the
+  delay is passed the delay starts from the beginning."
   [millis r]
   {:pre [(number? millis) (reactive? r)]
    :post [(reactive? %)]}
@@ -453,6 +496,8 @@
 
 
 (defn delay
+  "Returns an eventstream that emits an item of r after millis
+  milliseconds."
   [millis r]
   {:pre [(pos? millis) (reactive? r)]
    :post [(reactive? %)]}
@@ -467,6 +512,7 @@
 
 
 (defn distinct
+  "Returns an eventstream that emits only distinct items of r."
   [r]
   (let [vs (atom #{})]
     (derive-new eventstream "distinct" [r]
@@ -479,6 +525,8 @@
 
 
 (defn drop-while
+  "Returns an eventstream that skips items of r until the predicate
+  pred is false for an item of r."
   [pred r]
   (derive-new eventstream "drop" [r]
               :link-fn
@@ -489,17 +537,20 @@
 
 
 (defn drop
-  [no r]
-  {:pre [(pos? no) (reactive? r)]
+  "Returns an eventstream that first drops n items of r, all
+  subsequent items are emitted."
+  [n r]
+  {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
-  (drop-while (countdown no) r))
+  (drop-while (countdown n) r))
 
 
 (defn drop-last
-  [no r]
-  {:pre [(pos? no) (reactive? r)]
+  "Returns an eventstream that drops the last n items of r."
+  [n r]
+  {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
-  (let [q (atom (make-queue no))]
+  (let [q (atom (make-queue n))]
     (derive-new eventstream "drop-last" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives]}]
@@ -509,6 +560,8 @@
                       {:dont-complete nil}))))))
 
 (defn every
+  "Returns an eventstream that emits false as soon as the first falsey
+  item is emitted by r."
   ([r]
      (every identity r))
   ([pred r]
@@ -516,6 +569,8 @@
 
 
 (defn filter
+  "Returns an eventstream that emits only items of r if pred returns
+  true."
   [pred r]
   {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
@@ -531,6 +586,9 @@
 
 
 (defn flatmap
+  "Returns an eventstream that passes each item of r to a function
+  f [x -> Reactive]. Consecutively emits all items of those resulting
+  reactives."
   [f r]
   {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
@@ -543,12 +601,12 @@
                                     :link-fn
                                     (fn [{:keys [input-rvts] :as input}]
                                       (let [r (f (fvalue input-rvts))]
-                                        (c/swap! state enqueue-reactive state r)))
-                                    ))
+                                        (c/swap! state enqueue-reactive state r)))))
     new-r))
 
 
 (defn hold
+  "Returns a behavior that always contains the last item emitted by r."
   [r]
   {:pre [(reactive? r)]
    :post [(behavior? %)]}
@@ -556,6 +614,8 @@
 
 
 (defn into
+  "Takes items from the last given reactive and broadcasts it to all
+  preceding reactives. Returns the first reactive."
   [ & rs]
   {:pre [(< 1 (c/count rs)) (every? reactive? rs)]
    :post [(reactive? %)]}
@@ -564,6 +624,8 @@
 
 
 (defn map
+  "Returns an eventstream that emits the results of application of f
+  whenever all reactives in rs have items available."
   [f & rs]
   {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
@@ -717,17 +779,17 @@
 
 
 (defn take
-  [no r]
-  {:pre [(pos? no) (reactive? r)]
+  [n r]
+  {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
-  (take-while (countdown no) r))
+  (take-while (countdown n) r))
 
 
 (defn take-last
-  [no r]
-  {:pre [(pos? no) (reactive? r)]
+  [n r]
+  {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
-  (let [q (atom (make-queue no))]
+  (let [q (atom (make-queue n))]
     (derive-new eventstream "take-last" [r]
                 :link-fn
                 (fn [{:keys [input-rvts]}]
@@ -836,6 +898,11 @@
 
 
 (defmacro lift
+  "Lifts an expression to operate on behaviors. 
+  Returns a behavior that is updated whenever a value 
+  of a behavior referenced in the expression is updated.
+
+  Supports function application, let, cond, and, or."
   [expr]
   (lift* expr))
 
@@ -883,7 +950,6 @@
 ;; Error handling
 
 
-
 (defn err-ignore
   [r]
   (on-error *netref* r
@@ -928,5 +994,6 @@
 
 
 (defn in-future
+  "Returns an fn-spec that wraps f to be executed by a FutureExecutor."
   [f]
   {:f f :executor (FutureExecutor.)})

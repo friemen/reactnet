@@ -17,7 +17,7 @@
 
 
 (defn interval
-  "Schedules a no-arg function to be run immediately (of after an
+  "Schedules a no-arg function to be run immediately (or after an
   initial-millis delay) and then every rate-millis milliseconds. Returns a task."
   ([s rate-millis f]
      (interval s 0 rate-millis f))
