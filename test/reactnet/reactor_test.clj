@@ -388,6 +388,15 @@
     (is (= [1 3 6 10] @r))))
 
 
+(deftest sliding-buffer-test
+  (let [r      (atom [])
+        values (range 6)
+        e      (r/eventstream "e")
+        c      (->> e (r/sliding-buffer 3) (r/swap! r conj))]
+    (apply push-and-wait! (interleave (repeat e) values))
+    (is (= [[0] [0 1] [0 1 2] [1 2 3] [2 3 4] [3 4 5]] @r))))
+
+
 (deftest snapshot-test
   (let [r   (atom [])
         b   (r/behavior "source" 42)

@@ -637,6 +637,8 @@
 
 
 (defn mapcat
+  "Returns an eventstream that emits items of collections that f
+  applied to values of reactives in rs returns."
   [f & rs]
   {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
@@ -652,6 +654,9 @@
 
 
 (defn match
+  "Returns an eventstream that emits match-value and completes as soon
+  as pred applied to items of r is true. Otherwise emits default-value
+  on completion if no item in r matched pred."
   ([pred match-value default-value r]
   {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
@@ -669,6 +674,8 @@
 
 
 (defn merge
+  "Returns an eventstream that emits items from all reactives in rs in
+  the order they arrive."
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
@@ -679,6 +686,9 @@
 
 
 (defn reduce
+  "Returns an eventstream that applies the reducing function f to the
+  accumulated value (initially seeded with initial-value) and items
+  emitted by r. Emits a result only upon completion of r."
   [f initial-value r]
   {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
@@ -695,6 +705,8 @@
 
 
 (defn remove
+  "Returns an eventstream that drops items from r if they match the
+  predicate pred."
   [pred r]
   (filter (if (map? pred)
             (update-in pred [:f] complement)
@@ -703,6 +715,9 @@
 
 
 (defn scan
+  "Returns an eventstream that applies the reducing function f to the
+  accumulated value (initially seeded with initial-value) and items
+  emitted by r. Emits each result of f."
   [f initial-value r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
@@ -713,18 +728,42 @@
                 (make-link-fn #(c/swap! accu f %)))))
 
 
+(defn sliding-buffer
+  "Returns an eventstream that emits vectors of items from r, with a
+  maximum of n items. When n is reached drops the oldest item and
+  conjoins the youngest item from r."
+  [n r]
+  {:pre [(reactive? r)]
+   :post [(reactive? %)]}
+  (let [q (atom [])]
+    (derive-new eventstream "sliding-buffer" [r]
+                :link-fn
+                (fn [{:keys [input-rvts output-reactives]}]
+                  (let [vs (c/swap! q
+                            (fn [items]
+                              (conj (if (>= (c/count items) n)
+                                      (vec (c/drop 1 items))
+                                      items)
+                                    (fvalue input-rvts))))]
+                    {:output-rvts (broadcast-value vs output-reactives)})))))
+
+
 (defn startwith
+  "Returns an eventstream that first emits items from start-r until
+  completion, then emits items from r."
   [start-r r]
   (concat start-r r))
 
 
 (defn switch
+  "Returns and eventstream that emits items from the latest reactive
+  emitted by r."
   [r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
   (let [new-r (eventstream "switch")]
     (add-links! *netref*
-                (make-link "switcher" [r] []
+                (make-link "switcher" [r] [] ;; must not point to an output reactive
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
@@ -735,10 +774,10 @@
 
 
 (defn snapshot
-  [f-or-ref-or-value r]
+  [x r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
-  (let [f (sample-fn f-or-ref-or-value)]
+  (let [f (sample-fn x)]
     (derive-new eventstream "snapshot" [r]
                 :link-fn
                 (fn [{:keys [output-reactives]}]
