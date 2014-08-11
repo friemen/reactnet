@@ -26,12 +26,6 @@
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 ;; - Implement unsubscribe
 ;; - Implement empty
-;; - Is cycle useful?
-;; - Implement proper error handling:
-;; - It should support features like 'return', 'retry', 'resume', 'ignore'
-;; - It should allow redirection of an exception to a specific eventstream
-;; - A retry would push! the same values again
-;; - Special care must be taken for async operations
 
 
 
@@ -894,9 +888,31 @@
   (let [netref *netref*]
     (on-error *netref* reactive
               (fn [{:keys [input-rvts]}]
-                (sched/once scheduler millis #(try (enq netref {:rvt-map (c/into {} (vec input-rvts))})
-                                                  (catch Exception ex (.printStackTrace ex))))
+                (sched/once scheduler millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
                 {}))))
+
+(defn err-return
+  [x reactive]
+  (on-error *netref* reactive
+            (fn [{:keys [output-reactives]}]
+              {:output-rvts (single-value x (first output-reactives))})))
+
+
+(defn err-switch
+  [reactive-after-error reactive]
+  {:pre [(reactive? reactive-after-error) (reactive? reactive)]}
+  (on-error *netref* reactive
+            (fn [{:keys [input-reactives]}]
+              {:remove-by #(= (link-outputs %) [reactive])
+               :add [(make-link "err" [reactive-after-error] [reactive]
+                                :link-fn default-link-fn)]})))
+
+(defn err-into
+  [error-reactive reactive]
+  (on-error *netref* reactive
+            (fn [input]
+              (enq *netref* {:rvt-map {error-reactive [input (now)]}}))))
+
 
 ;; ---------------------------------------------------------------------------
 ;; Async execution

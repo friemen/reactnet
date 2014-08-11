@@ -521,15 +521,71 @@
 ;; ---------------------------------------------------------------------------
 ;; Tests of error handling
 
+(defn- id-or-ex
+  [x]
+  (if (= 42 x)
+    (throw (IllegalArgumentException. (str x)))
+    x))
+
 
 (deftest err-ignore-test
   (let [r (atom [])
         e (r/eventstream "e")
         c (->> e
-               (r/map #(if (= 42 %)
-                         (throw (IllegalArgumentException. (str %)))
-                         %))
+               (r/map id-or-ex)
                r/err-ignore
                (r/swap! r conj))]
     (push-and-wait! e 1 e 2 e 42 e 3)
     (is (= [1 2 3] @r))))
+
+
+(deftest err-retry-after-test
+  (let [r (atom [])
+        n (atom 2)
+        e (r/eventstream "e")
+        c (->> e
+               (r/map (fn [x] (if (and (= x 42)
+                                       (< 0 (swap! n dec)))
+                                (throw (IllegalArgumentException. (str x)))
+                                x)))
+               (r/err-retry-after 50)
+               (r/swap! r conj))]
+    (push-and-wait! e 1 e 2 e 42 e 3)
+    (is (= 0 @n))
+    (is (= [1 2 3 42] @r))))
+
+
+(deftest err-return-test
+  (let [r  (atom [])
+        e  (r/eventstream "e")
+        c  (->> e
+               (r/map id-or-ex)
+               (r/err-return 99)
+               (r/swap! r conj))]
+    (push-and-wait! e 1 e 2 e 42 e 3)
+    (is (= [1 2 99 3] @r))))
+
+
+(deftest err-switch-test
+  (let [r  (atom [])
+        e1 (r/eventstream "e1")
+        e2 (r/seqstream (range 5))
+        c (->> e1
+               (r/map id-or-ex)
+               (r/err-switch e2)
+               (r/swap! r conj))]
+    (push-and-wait! e1 1 e1 2 e1 42 e1 3)
+    (is (= [1 2 0 1 2 3 4] @r))))
+
+
+(deftest err-into-test
+  (let [r      (atom [])
+        errors (r/eventstream "errors")
+        e      (r/eventstream "e")
+        c      (->> e
+                    (r/map id-or-ex)
+                    (r/err-into errors)
+                    (r/swap! r conj))]
+    (push-and-wait! e 1 e 2 e 42 e 3)
+    (is (= [1 2 3] @r))
+    (is (instance? IllegalArgumentException (-> errors deref :exception)))))
