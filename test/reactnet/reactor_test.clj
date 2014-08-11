@@ -57,6 +57,17 @@
     (let [r  (atom [])
           e  (->> (constantly :foo) r/just (r/swap! r conj))]
       (wait)
+      (is (= [:foo] @r))))
+  (testing "A future"
+    (let [r  (atom [])
+          e  (->> (r/in-future (fn [] 
+                                 (Thread/sleep 300)
+                                 :foo))
+                  r/just
+                  (r/swap! r conj))]
+      (wait)
+      (is (= [] @r))
+      (wait)
       (is (= [:foo] @r)))))
 
 

@@ -6,9 +6,9 @@ Consistent value propagation through a network of reactives.
 
 [API docs](https://friemen.github.com/reactnet)
 
-The goal is a core for a reactive library that is designed to avoid
-inconsistencies and bouncing effects and gracefully handles infinite
-loops caused by cyclic dependencies.
+The goal is a core for a push-based reactive library that is designed
+to avoid inconsistencies and bouncing effects and gracefully handles
+infinite loops caused by cyclic dependencies.
 
 It will be the core of a [reactor](https://github.com/friemen/reactor)
 re-implementation.
@@ -19,7 +19,7 @@ Key ideas of reactnet are:
 * Updates to the network (add / remove links) or propagations of
   events are enqueued and processed sequentially in a separate
   thread.
-* To avoid blocking the propagation thread links can invoke functions
+* To avoid blocking the propagation thread, links can invoke functions
   asynchronously.
 * Value propagation is done along the topological order of reactives
   and links.
@@ -30,9 +30,8 @@ Key ideas of reactnet are:
 
 ## Introduction
 
-This library is a low-level tool for creating combinators that follow
-[FRP](http://en.wikipedia.org/wiki/Functional_reactive_programming)
-ideas.
+This library is a low-level tool for creating combinators that are
+inspired by [FRP](http://en.wikipedia.org/wiki/Functional_reactive_programming).
 
 To illustrate how reactnet can be used we take three steps:
 * Provide functions that conveniently create links.

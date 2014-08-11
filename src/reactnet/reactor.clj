@@ -280,12 +280,15 @@
 
 (defn just
   [{:keys [executor f] :as x}]
-  (if (and executor f)
-    (let [new-r  (eventstream "just")]
-      (execute executor *netref* #(rn/push! new-r (f)))
-      new-r)
-    (assoc (seqstream [((sample-fn x))])
-      :label "just")))
+  (let [new-r  (eventstream "just")
+        f      (sample-fn (if (and executor f) f x))
+        task-f (fn []
+                 (rn/push! new-r (f))
+                 (rn/push! new-r ::rn/completed))]
+    (if executor
+      (execute executor *netref* task-f)
+      (task-f))
+    new-r))
 
 
 (defn sample
