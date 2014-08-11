@@ -10,11 +10,9 @@
             [reactnet.executors]
             [reactnet.core :as rn
              :refer [add-links! broadcast-value completed? default-link-fn
-                     enq enqueue-values execute fvalue fn-spec? link-inputs
-                     link-outputs make-link make-network make-result-map
-                     make-sync-link-fn *netref* now reactive? remove-links!
-                     replace-link-error-fn single-value unpack-fn values
-                     zip-values]
+                     enq enqueue-values execute fvalue link-inputs
+                     link-outputs make-link make-network *netref* now on-error
+                     reactive? remove-links! single-value values zip-values]
              :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
@@ -181,6 +179,64 @@
                                     :error-fn error-fn
                                     :complete-on-remove [new-r]))
     new-r))
+
+
+(defn- safely-apply
+  "Applies f to xs, and catches exceptions.
+  Returns a pair of [result exception], at least one of them being nil."
+  [f xs]
+  (try [(apply f xs) nil]
+       (catch Exception ex [nil ex])))
+
+
+(defn- make-result-map
+  "Input is a Result map as passed into a Link function. If the
+  exception ex is nil produces a broadcasting output-rvts, otherwise
+  adds the exception. Returns an updated Result map."
+  ([input value]
+     (make-result-map input value nil))
+  ([{:keys [output-reactives] :as input} value ex]
+     (assoc input 
+       :output-rvts (if-not ex (broadcast-value value output-reactives))
+       :exception ex)))
+
+
+(defn- make-link-fn
+  "Takes a function f and wraps it's synchronous execution so that
+  exceptions are caught and the return value is properly assigned to
+  all output reactives.
+
+  The optional result-fn is a function [Result Value Exception -> Result] 
+  that returns the input Result map with updated values for 
+  :output-rvts, :exception, :add, :remove-by, :no-consume entries.
+
+  Returns a link function."
+  ([f]
+     (make-link-fn f make-result-map))
+  ([f result-fn]
+     {:pre [f]}
+     (fn [{:keys [input-rvts] :as input}]
+       (let [[v ex] (safely-apply f (values input-rvts))]
+         (result-fn input v ex)))))
+
+
+(defn- unpack-fn-spec
+  "Returns a pair of [executor f]. If fn-spec is only a
+  function (instead of a map containing both) then [nil f] is
+  returned."
+  [{:keys [f executor] :as fn-spec}]
+  (if executor
+    [executor f]
+    [nil fn-spec]))
+
+
+(defn- fn-spec?
+  "Returns true if f is either a function or a map containing a
+  function in an :f entry."
+  [f]
+  (or (instance? clojure.lang.IFn f)
+      (and (map? f) (instance? clojure.lang.IFn (:f f)))))
+
 
 
 ;; ---------------------------------------------------------------------------
@@ -470,8 +526,9 @@
   [pred reactive]
   {:pre [(fn-spec? pred) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn pred)]
+  (let [[executor f] (unpack-fn-spec pred)]
     (derive-new eventstream "filter" [reactive]
+                :executor executor
                 :link-fn
                 (make-link-fn f (fn [{:keys [input-rvts] :as input} v ex]
                                   (if v
@@ -484,15 +541,17 @@
   [f reactive]
   {:pre [(fn-spec? f) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)
+  (let [[executor f] (unpack-fn-spec f)
         new-r    (eventstream "flatmap")
         state    (atom (make-reactive-queue new-r)) ]
     (add-links! *netref* (make-link "flatmap" [reactive] [new-r]
-                                   :link-fn
-                                   (fn [{:keys [input-rvts] :as input}]
-                                     (let [r (f (fvalue input-rvts))]
-                                       (c/swap! state enqueue-reactive state r)))
-                                   :complete-on-remove [new-r]))
+                                    :complete-on-remove [new-r]
+                                    :executor executor
+                                    :link-fn
+                                    (fn [{:keys [input-rvts] :as input}]
+                                      (let [r (f (fvalue input-rvts))]
+                                        (c/swap! state enqueue-reactive state r)))
+                                    ))
     new-r))
 
 
@@ -515,8 +574,9 @@
   [f & reactives]
   {:pre [(fn-spec? f) (every? reactive? reactives)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)]
+  (let [[executor f] (unpack-fn-spec f)]
     (derive-new eventstream "map" reactives
+                :executor executor
                 :link-fn
                 (make-link-fn f make-result-map))))
 
@@ -525,8 +585,9 @@
   [f & reactives]
   {:pre [(fn-spec? f) (every? reactive? reactives)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)]
+  (let [[executor f] (unpack-fn-spec f)]
     (derive-new eventstream "mapcat" reactives
+                :executor executor
                 :link-fn
                 (make-link-fn f (fn [input vs ex]
                                   (assoc input
@@ -539,8 +600,9 @@
   ([pred match-value default-value reactive]
   {:pre [(fn-spec? pred) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn pred] (unpack-fn pred)]
+  (let [[executor pred] (unpack-fn-spec pred)]
     (derive-new eventstream "match" [reactive]
+                :executor executor
                 :link-fn
                 (make-link-fn pred
                               (fn [{:keys [output-reactives]} v ex]
@@ -565,9 +627,10 @@
   [f initial-value reactive]
   {:pre [(fn-spec? f) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)
-        accu             (atom initial-value)]
+  (let [[executor f] (unpack-fn-spec f)
+        accu         (atom initial-value)]
     (derive-new eventstream "reduce" [reactive]
+                :executor executor
                 :link-fn
                 (make-link-fn (fn [v] (c/swap! accu f v))
                               (constantly {}))
@@ -588,8 +651,8 @@
   [f initial-value reactive]
   {:pre [(reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)
-        accu             (atom initial-value)]
+  (let [[executor f] (unpack-fn-spec f)
+        accu         (atom initial-value)]
     (derive-new eventstream "scan" [reactive]
                 :link-fn
                 (make-link-fn (fn [v] (c/swap! accu f v))
@@ -619,6 +682,8 @@
 
 (defn snapshot
   [f-or-ref-or-value reactive]
+  {:pre [(reactive? reactive)]
+   :post [(reactive? %)]}
   (let [f (sample-fn f-or-ref-or-value)]
     (derive-new eventstream "snapshot" [reactive]
                 :link-fn
@@ -630,9 +695,10 @@
   [f reactive]
   {:pre [(fn-spec? f) (reactive? reactive)]
    :post [(reactive? %)]}
-  (let [[make-link-fn f] (unpack-fn f)]
+  (let [[executor f] (unpack-fn-spec f)]
     (add-links! *netref* (make-link "subscriber" [reactive] []
-                                    :link-fn (make-link-fn f (constantly {}))))
+                                    :link-fn (make-link-fn f (constantly {}))
+                                    :executor executor))
     reactive))
 
 
@@ -727,28 +793,28 @@
    :post [(reactive? %)]}
   (derive-new behavior "lift-fn" reactives
               :link-fn
-              (make-sync-link-fn f)))
+              (make-link-fn f)))
 
 
 (defn ^:no-doc lift-if
   [test-b then-b else-b]
   (derive-new behavior "lift-if" [test-b then-b else-b]
               :link-fn
-              (make-sync-link-fn (fn [test then else]
-                                   (if test then else)))))
+              (make-link-fn (fn [test then else]
+                              (if test then else)))))
 
 
 (defn ^:no-doc lift-cond
   [& test-expr-bs]
   (derive-new behavior "lift-cond" test-expr-bs
               :link-fn
-              (make-sync-link-fn (fn [& args]
-                                   (let [[test-value
-                                          expr-value] (->> args
-                                                           (partition 2)
-                                                           (c/drop-while (comp not first))
-                                                           first)]
-                                     expr-value)))))
+              (make-link-fn (fn [& args]
+                              (let [[test-value
+                                     expr-value] (->> args
+                                                      (partition 2)
+                                                      (c/drop-while (comp not first))
+                                                      first)]
+                                expr-value)))))
 
 (defn- lift-exprs
   [exprs]
@@ -816,13 +882,21 @@
 ;; Error handling
 
 
+
 (defn err-ignore
   [reactive]
-  (enq *netref* {:exec [replace-link-error-fn
-                        (fn [l]
-                          (= (link-outputs l) [reactive]))
-                        (fn [result] {})]})
-  reactive)
+  (on-error *netref* reactive
+            (fn [result] {})))
+
+
+(defn err-retry-after
+  [millis reactive]
+  (let [netref *netref*]
+    (on-error *netref* reactive
+              (fn [{:keys [input-rvts]}]
+                (sched/once scheduler millis #(try (enq netref {:rvt-map (c/into {} (vec input-rvts))})
+                                                  (catch Exception ex (.printStackTrace ex))))
+                {}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Async execution

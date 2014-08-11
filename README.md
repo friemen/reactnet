@@ -284,6 +284,7 @@ A map connecting input and output reactives via a function.
   :complete-fn         A function [Link Reactive -> Result] called when one of the
                        input reactives becomes completed
   :complete-on-remove  A seq of reactives to be completed when this link is removed
+  :executor            The executor to use for invoking the link function (see below)
 ```
 Reactives are known to the network solely by links referencing them.
 
@@ -380,6 +381,18 @@ propagation/updates to it are enqueued.
     function.")
   (network [netref]
     "Return the network map."))
+```
+
+### Executor
+Used to execute link functions in another thread / asynchronously.
+Implementations are expected to bind the dynamic \*netref\* var to
+the value of the netref arg.
+
+```clojure
+(defprotocol IExecutor
+  (execute [e netref f]
+    "Execute a no-arg function f in the context of the network
+    reference netref."))
 ```
 
 ## Creating links
@@ -511,7 +524,8 @@ can set any of the following entries:
 TODO Show some implementations of reactor
 
 * derive-new
-* Asynchronous function invocation: delay
+* Asynchronous function invocation with a scheduler: delay
+* Asynchronous function invocation with an executor: map
 * Stateful links: distinct
 
 

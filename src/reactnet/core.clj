@@ -46,6 +46,7 @@
 ;;   :complete-fn         A function [Link Reactive -> Result] called when one of the
 ;;                        input reactives becomes completed
 ;;   :complete-on-remove  A seq of reactives to be completed when this link is removed
+;;   :executor            The executor to use for invoking the link function
 ;;   :level               The level within the reactive network
 ;;                        (max level of all input reactives + 1)
 
@@ -119,6 +120,16 @@
 
 
 (def ^:dynamic *netref* "A reference to a default network." nil)
+
+
+;; Executor
+;; Used to execute link functions in another thread / asynchronously.
+
+(defprotocol IExecutor
+  (execute [e netref f]
+    "Execute a no-arg function f on a different thread with the dynamic var
+    *netref* bound to netref."))
+
 
 
 ;; ---------------------------------------------------------------------------
@@ -276,7 +287,7 @@
   The sequence complete-on-remove contains all reactives that should be
   completed when this Link is removed from the network."
   [label inputs outputs
-   & {:keys [link-fn error-fn complete-fn complete-on-remove]
+   & {:keys [link-fn error-fn complete-fn complete-on-remove executor]
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)
          (every? reactive? (concat inputs outputs))]}
@@ -287,6 +298,7 @@
    :error-fn error-fn
    :complete-fn complete-fn
    :complete-on-remove complete-on-remove
+   :executor executor
    :level 0})
 
 
@@ -573,7 +585,7 @@
         (update-links links-to-remove links-to-add))))
 
 
-(defn replace-link-error-fn
+(defn ^:no-doc replace-link-error-fn
   "Match the first link by pred, attach the error-fn and replace the
   link. Returns an updated network."
   [{:keys [id links] :as n} pred error-fn]
@@ -597,10 +609,20 @@
       (.printStackTrace exception))))
 
 
+(defn- safely-exec-link-fn
+  "Execute link-fn, catch exception and return a Result map that
+  merges input with link-fn result and / or error-fn result."
+  [{:keys [link-fn] :as link} input]
+  (let [result        (try (link-fn input)
+                           (catch Exception ex {:exception ex
+                                                :dont-complete nil}))
+        error-result  (handle-exception! link (merge input result))]
+    (merge input result error-result)))
+
+
 (defn- eval-link!
-  "Evaluates one link, returning Result map, or nil if the link function
-  returned nil."
-  [rvt-map {:keys [link-fn level] :as link}]
+  "Evaluates one link (possibly using the links executor), returning a Result map."
+  [rvt-map {:keys [link-fn level executor] :as link}]
   (let [inputs       (link-inputs link)
         outputs      (->> link link-outputs (remove nil?))
         input        {:link link
@@ -609,11 +631,19 @@
                       :output-reactives outputs
                       :output-rvts nil
                       :dont-complete (set outputs)}
-        result        (try (link-fn input)
-                           (catch Exception ex {:exception ex
-                                                :dont-complete nil}))
-        error-result  (handle-exception! link (merge input result))]
-    (merge input result error-result)))
+        netref       *netref*]
+    (if executor
+      (do (execute executor
+                   netref
+                   (fn []
+                     (let [result-map (safely-exec-link-fn link input)]
+                       ;; send changes / values to netref
+                       (when (or (seq (:add result-map))
+                                 (:remove-by result-map)
+                                 (seq (:output-rvts result-map)))
+                         (enq netref {:results [result-map]})))))
+          input)
+      (safely-exec-link-fn link input))))
 
 
 (defn- eval-complete-fns!
@@ -820,6 +850,17 @@
   (enq netref {:remove-by pred}))
 
 
+(defn on-error
+  "Installs error-fn in the link that has as only output the reactive
+  r."
+  [netref r error-fn]
+  (enq netref {:exec [(comp rebuild-if-necessary replace-link-error-fn)
+                      (fn [l]
+                        (= (link-outputs l) [r]))
+                      error-fn]})
+  r)
+
+
 (defn reset-network!
   "Removes all links and clears any other data from the network. 
   Returns :reset."
@@ -850,100 +891,6 @@
   [netref & exprs]
   `(binding [reactnet.core/*netref* ~netref]
      ~@exprs))
-
-
-;; ---------------------------------------------------------------------------
-;; Tools for implementing Link functions
-
-
-(defprotocol IExecutor
-  (execute [e netref f]
-    "Execute a no-arg function f in the context of the network
-    reference netref."))
-
-
-(defn safely-apply
-  "Applies f to xs, and catches exceptions.
-  Returns a pair of [result exception], at least one of them being nil."
-  [f xs]
-  (try [(apply f xs) nil]
-       (catch Exception ex [nil ex])))
-
-
-(defn make-result-map
-  "Input is a Result map as passed into a Link function. If the
-  exception ex is nil produces a broadcasting output-rvts, otherwise
-  adds the exception. Returns an updated Result map."
-  ([input value]
-     (make-result-map input value nil))
-  ([{:keys [output-reactives] :as input} value ex]
-     (assoc input 
-       :output-rvts (if-not ex (broadcast-value value output-reactives))
-       :exception ex)))
-
-
-(defn make-exec-link-fn
-  "Takes a function f and wraps it's execution in an executors execute, 
-  thus allowing a different thread to evaluate f.
-  Any result will be pushed asynchronously into the network.
-
-  The optional result-fn is a function [Result Value Exception -> Result] 
-  that returns the input Result map with updated values for 
-  :output-rvts, :exception, :add, :remove-by, :no-consume entries.
-
-  Returns a link function."  
-  ([executor f]
-     (make-exec-link-fn f make-result-map))
-  ([executor f result-fn]
-     (let [netref *netref*]
-       (fn [{:keys [input-reactives input-rvts] :as input}]
-         (execute executor
-                  netref
-                  (fn []
-                    (let [[v ex]      (safely-apply f (values input-rvts))
-                          result-map  (result-fn input v ex)]
-                      ;; send changes / values to netref
-                      (when (or (seq (:add result-map))
-                                (:remove-by result-map)
-                                (seq (:output-rvts result-map)))
-                        (enq netref {:results [result-map]})))))
-         nil))))
-
-
-(defn make-sync-link-fn
-  "Takes a function f and wraps it's synchronous execution so that
-  exceptions are caught and the return value is properly assigned to
-  all output reactives.
-
-  The optional result-fn is a function [Result Value Exception -> Result] 
-  that returns the input Result map with updated values for 
-  :output-rvts, :exception, :add, :remove-by, :no-consume entries.
-
-  Returns a link function."
-  ([f]
-     (make-sync-link-fn f make-result-map))
-  ([f result-fn]
-     (fn [{:keys [input-rvts] :as input}]
-       (let [[v ex] (safely-apply f (values input-rvts))]
-         (result-fn input v ex)))))
-
-
-(defn fn-spec?
-  "Returns true if f is either a function or a map containing a
-  function in an :f entry."
-  [f]
-  (or (instance? clojure.lang.IFn f)
-      (and (map? f) (instance? clojure.lang.IFn (:f f)))))
-
-
-(defn unpack-fn
-  "Returns a pair of two functions. First is a factory [Lift-Fn
-  Make-Result-Fn -> Link-Fn] that creates a link function. Second is
-  an arbitrary function that is lifted by the factory."
-  [{:keys [f executor] :as fn-spec}]
-  (if (and f executor)
-    [(partial make-exec-link-fn executor) f]
-    [make-sync-link-fn fn-spec]))
 
 
 :ok

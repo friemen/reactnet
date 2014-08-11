@@ -2,17 +2,26 @@
   (:require [clojure.test :refer :all]
             [reactnet.core :as rn]
             [reactnet.netrefs :as refs]
-            [reactnet.reactives :refer [behavior eventstream seqstream]]))
+            [reactnet.reactives :refer [behavior eventstream seqstream]]
+            [reactnet.executors])
+  (:import [reactnet.core IExecutor]))
 
 
 ;; ---------------------------------------------------------------------------
 ;; Supportive functions
 
 
+(defn make-link-fn
+  [f]
+  (fn [{:keys [input-rvts output-reactives] :as input}]
+    (let [v (apply f (rn/values input-rvts))]
+      {:output-rvts (rn/broadcast-value v output-reactives)})))
+
+
 (defmacro link
   [f inputs outputs]
   `(rn/make-link (str '~f) ~inputs ~outputs
-                :link-fn (rn/make-sync-link-fn ~f)))
+                :link-fn (make-link-fn ~f)))
 
 (defmacro with-network
   [links & exprs]
@@ -107,10 +116,10 @@
     (rn/with-netref
       (refs/agent-netref
        (rn/make-network "test" [(rn/make-link "inc-e1" [e1] [e1]
-                                              :link-fn (fn [{:keys [input-rvts] :as input}]
+                                              :link-fn (fn [{:keys [input-rvts output-reactives] :as input}]
                                                          (let [v (inc (rn/fvalue input-rvts))]
                                                            (if (<= v 3)
-                                                             (rn/make-result-map input v)
+                                                             {:output-rvts (rn/broadcast-value v output-reactives)}
                                                              {:remove-by #(= [e1] (rn/link-outputs %))}))))
                                 (link (partial swap! r conj) [e1] [])]))
       (push! e1 1)
@@ -222,10 +231,10 @@
                                       id (str "[" from " <= x < " to "]")
                                       filtered-r (eventstream "filtered")]
                                   [(rn/make-link id [i] [filtered-r]
-                                                :link-fn (fn [{:keys [input-rvts] :as input}]
+                                                :link-fn (fn [{:keys [input-rvts output-reactives] :as input}]
                                                            (let [x (rn/fvalue input-rvts)]
                                                              (if (and (<= from x) (< x to))
-                                                               (rn/make-result-map input x)
+                                                               {:output-rvts (rn/broadcast-value x output-reactives)}
                                                                {}))))
                                    (rn/make-link (str "merge" id) [filtered-r] [o])])))
                       (cons (rn/make-link "subscriber" [o] []
@@ -249,9 +258,9 @@
     (rn/with-netref
       (refs/agent-netref
        (rn/make-network "test" [(rn/make-link "e1,e2->e3" [e1 e2] [e3]
-                                              :link-fn (fn [{:keys [input-rvts] :as input}]
+                                              :link-fn (fn [{:keys [input-rvts output-reactives] :as input}]
                                                          (let [v (reduce + (rn/values input-rvts))]
-                                                           (rn/make-result-map input v)) )
+                                                           {:output-rvts (rn/broadcast-value v output-reactives)}))
                                               :complete-on-remove [e3])
                                 (rn/make-link "e3->e4" [e3] [e4]
                                               :complete-on-remove [])
@@ -329,3 +338,24 @@
       (apply push! (cons e1 ranges))
       (is (= expected @r))
       (is (= 3 (-> rn/*netref* rn/network :links count))))))
+
+
+(deftest async-exec-test
+  (let [exec  (reify IExecutor
+                (execute [e netref f]
+                  (future
+                    (rn/with-netref netref
+                      (Thread/sleep 100)
+                      (try (f)
+                           (catch Exception ex (.printStackTrace ex) ex))))))
+        e1    (eventstream "e1")
+        r     (atom [])]
+    (rn/with-netref
+      (refs/agent-netref
+       (rn/make-network "test" [(assoc (link (partial swap! r conj) [e1] [])
+                                  :executor exec)]))
+      (push! e1 42)
+      (Thread/sleep 50)
+      (is (= [] @r))
+      (Thread/sleep 100)
+      (is (= [42] @r)))))
