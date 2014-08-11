@@ -93,7 +93,7 @@
 
 ;; Stimulus
 ;; A map containing data that is passed to enq/update-and-propagate! to
-;; start an update/propagation cycle of a network.
+;; start an update/propagation cycle on a network.
 ;;   :results             A seq of Result maps
 ;;   :remove-by           A predicate matching links to remove from the network
 ;;   :add                 A seq of links to add to the network

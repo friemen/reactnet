@@ -42,7 +42,7 @@
 
 (defn behavior
   ([label]
-     (behavior "" nil))
+     (behavior label nil))
   ([label value]
      (Behavior. label
                 (atom [value (now)])
@@ -50,8 +50,8 @@
 
 
 (defn behavior?
-  [reactive]
-  (instance? Behavior reactive))
+  [r]
+  (instance? Behavior r))
 
 
 (defn eventstream
@@ -63,11 +63,10 @@
                 1000))
 
 
-
 (defn eventstream?
-  [reactive]
-  (or (instance? Eventstream reactive)
-      (instance? Seqstream reactive)))
+  [r]
+  (or (instance? Eventstream r)
+      (instance? Seqstream r)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -98,8 +97,8 @@
 (defn- make-reactive-queue
   ([output]
      (make-reactive-queue output nil))
-  ([output reactives]
-     {:queue (vec reactives)
+  ([output rs]
+     {:queue (vec rs)
       :input nil
       :output output}))
 
@@ -327,8 +326,8 @@
 
 
 (defn amb
-  [& reactives]
-  {:pre [(every? reactive? reactives)]
+  [& rs]
+  {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
   (let [new-r   (eventstream "amb")
         f       (fn [{:keys [input-reactives input-rvts] :as input}]
@@ -336,21 +335,21 @@
                     {:remove-by #(= (link-outputs %) [new-r])
                      :add [(make-link "amb-selected" [r] [new-r] :complete-on-remove [new-r])]
                      :output-rvts (single-value (fvalue input-rvts) new-r)}))
-        links   (->> reactives (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
+        links   (->> rs (c/map #(make-link "amb-tentative" [%] [new-r] :link-fn f)))]
     (apply (partial add-links! *netref*) links)
     new-r))
 
 
 (defn any
-  ([reactive]
-     (any identity reactive))
-  ([pred reactive]
-     (match pred true false reactive)))
+  ([r]
+     (any identity r))
+  ([pred r]
+     (match pred true false r)))
 
 
 (defn buffer
-  [no millis reactive]  
-  {:pre [(number? no) (number? millis) (reactive? reactive)]
+  [no millis r]  
+  {:pre [(number? no) (number? millis) (reactive? r)]
    :post [(reactive? %)]}
   (let [b      (atom {:queue [] :dequeued nil})
         task   (atom nil)
@@ -361,7 +360,7 @@
         deq    (fn [{:keys [queue] :as q}]
                  (assoc q :queue [] :dequeued queue))
         netref *netref*]
-    (derive-new eventstream "buffer" [reactive]
+    (derive-new eventstream "buffer" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output         (first output-reactives)
@@ -385,13 +384,13 @@
                       {:output-rvts (single-value vs (-> link link-outputs first))}))))))
 
 (defn buffer-t
-  [millis reactive]
-  (buffer -1 millis reactive))
+  [millis r]
+  (buffer -1 millis r))
 
 
 (defn buffer-c
-  [no reactive]
-  (buffer no -1 reactive))
+  [no r]
+  (buffer no -1 r))
 
 
 (defn changes
@@ -410,33 +409,33 @@
 
 
 (defn concat
-  [& reactives]
-  {:pre [(every? reactive? reactives)]
+  [& rs]
+  {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
   (let [new-r   (eventstream "concat")
-        state   (atom (make-reactive-queue new-r reactives))
+        state   (atom (make-reactive-queue new-r rs))
         link    (-> (c/swap! state switch-reactive state) :add first)]
     (add-links! *netref* link)
     new-r))
 
 
 (defn count
-  [reactive]
-  {:pre [(reactive? reactive)]
+  [r]
+  {:pre [(reactive? r)]
    :post [(reactive? %)]}
   (let [c (atom 0)]
-    (derive-new eventstream "count" [reactive]
+    (derive-new eventstream "count" [r]
                 :link-fn
                 (fn [{:keys [input-rvts] :as input}]
                   (make-result-map input (c/swap! c inc))))))
 
 
 (defn debounce
-  [millis reactive]
-  {:pre [(number? millis) (reactive? reactive)]
+  [millis r]
+  {:pre [(number? millis) (reactive? r)]
    :post [(reactive? %)]}
   (let [task (atom nil)]
-    (derive-new eventstream "debounce" [reactive]
+    (derive-new eventstream "debounce" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
@@ -451,11 +450,11 @@
 
 
 (defn delay
-  [millis reactive]
-  {:pre [(pos? millis) (reactive? reactive)]
+  [millis r]
+  {:pre [(pos? millis) (reactive? r)]
    :post [(reactive? %)]}
   (let [netref *netref*]
-    (derive-new eventstream "delay" [reactive]
+    (derive-new eventstream "delay" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
@@ -465,9 +464,9 @@
 
 
 (defn distinct
-  [reactive]
+  [r]
   (let [vs (atom #{})]
-    (derive-new eventstream "distinct" [reactive]
+    (derive-new eventstream "distinct" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [v (fvalue input-rvts)]
@@ -477,8 +476,8 @@
 
 
 (defn drop-while
-  [pred reactive]
-  (derive-new eventstream "drop" [reactive]
+  [pred r]
+  (derive-new eventstream "drop" [r]
               :link-fn
               (fn [{:keys [input-rvts] :as input}]
                 (if (apply pred (values input-rvts))
@@ -487,18 +486,18 @@
 
 
 (defn drop
-  [no reactive]
-  {:pre [(pos? no) (reactive? reactive)]
+  [no r]
+  {:pre [(pos? no) (reactive? r)]
    :post [(reactive? %)]}
-  (drop-while (countdown no) reactive))
+  (drop-while (countdown no) r))
 
 
 (defn drop-last
-  [no reactive]
-  {:pre [(pos? no) (reactive? reactive)]
+  [no r]
+  {:pre [(pos? no) (reactive? r)]
    :post [(reactive? %)]}
   (let [q (atom (make-queue no))]
-    (derive-new eventstream "drop-last" [reactive]
+    (derive-new eventstream "drop-last" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives]}]
                   (let [vs (:dequeued (c/swap! q enqueue (fvalue input-rvts)))]
@@ -507,18 +506,18 @@
                       {:dont-complete nil}))))))
 
 (defn every
-  ([reactive]
-     (every identity reactive))
-  ([pred reactive]
-     (match (complement pred) false true reactive)))
+  ([r]
+     (every identity r))
+  ([pred r]
+     (match (complement pred) false true r)))
 
 
 (defn filter
-  [pred reactive]
-  {:pre [(fn-spec? pred) (reactive? reactive)]
+  [pred r]
+  {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec pred)]
-    (derive-new eventstream "filter" [reactive]
+    (derive-new eventstream "filter" [r]
                 :executor executor
                 :link-fn
                 (make-link-fn f (fn [{:keys [input-rvts] :as input} v ex]
@@ -529,13 +528,13 @@
 
 
 (defn flatmap
-  [f reactive]
-  {:pre [(fn-spec? f) (reactive? reactive)]
+  [f r]
+  {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
         new-r    (eventstream "flatmap")
         state    (atom (make-reactive-queue new-r)) ]
-    (add-links! *netref* (make-link "flatmap" [reactive] [new-r]
+    (add-links! *netref* (make-link "flatmap" [r] [new-r]
                                     :complete-on-remove [new-r]
                                     :executor executor
                                     :link-fn
@@ -547,37 +546,37 @@
 
 
 (defn hold
-  [reactive]
-  {:pre [(reactive? reactive)]
+  [r]
+  {:pre [(reactive? r)]
    :post [(behavior? %)]}
-  (derive-new behavior "hold" [reactive]))
+  (derive-new behavior "hold" [r]))
 
 
 (defn into
-  [ & reactives]
-  {:pre [(< 1 (c/count reactives)) (every? reactive? reactives)]
+  [ & rs]
+  {:pre [(< 1 (c/count rs)) (every? reactive? rs)]
    :post [(reactive? %)]}
-  (add-links! *netref* (make-link "into" [(last reactives)] (c/drop-last reactives)))
-  (first reactives))
+  (add-links! *netref* (make-link "into" [(last rs)] (c/drop-last rs)))
+  (first rs))
 
 
 (defn map
-  [f & reactives]
-  {:pre [(fn-spec? f) (every? reactive? reactives)]
+  [f & rs]
+  {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)]
-    (derive-new eventstream "map" reactives
+    (derive-new eventstream "map" rs
                 :executor executor
                 :link-fn
                 (make-link-fn f make-result-map))))
 
 
 (defn mapcat
-  [f & reactives]
-  {:pre [(fn-spec? f) (every? reactive? reactives)]
+  [f & rs]
+  {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)]
-    (derive-new eventstream "mapcat" reactives
+    (derive-new eventstream "mapcat" rs
                 :executor executor
                 :link-fn
                 (make-link-fn f (fn [input vs ex]
@@ -588,11 +587,11 @@
 
 
 (defn match
-  ([pred match-value default-value reactive]
-  {:pre [(fn-spec? pred) (reactive? reactive)]
+  ([pred match-value default-value r]
+  {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor pred] (unpack-fn-spec pred)]
-    (derive-new eventstream "match" [reactive]
+    (derive-new eventstream "match" [r]
                 :executor executor
                 :link-fn
                 (make-link-fn pred
@@ -605,22 +604,22 @@
 
 
 (defn merge
-  [& reactives]
-  {:pre [(every? reactive? reactives)]
+  [& rs]
+  {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
   (let [new-r   (eventstream "merge")
-        links   (->> reactives (c/map #(make-link "merge" [%] [new-r])))]
+        links   (->> rs (c/map #(make-link "merge" [%] [new-r])))]
     (apply (partial add-links! *netref*) links)
     new-r))
 
 
 (defn reduce
-  [f initial-value reactive]
-  {:pre [(fn-spec? f) (reactive? reactive)]
+  [f initial-value r]
+  {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
         accu         (atom initial-value)]
-    (derive-new eventstream "reduce" [reactive]
+    (derive-new eventstream "reduce" [r]
                 :executor executor
                 :link-fn
                 (make-link-fn (fn [v] (c/swap! accu f v))
@@ -631,37 +630,37 @@
 
 
 (defn remove
-  [pred reactive]
+  [pred r]
   (filter (if (map? pred)
             (update-in pred [:f] complement)
             (complement pred))
-          reactive))
+          r))
 
 
 (defn scan
-  [f initial-value reactive]
-  {:pre [(reactive? reactive)]
+  [f initial-value r]
+  {:pre [(reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
         accu         (atom initial-value)]
-    (derive-new eventstream "scan" [reactive]
+    (derive-new eventstream "scan" [r]
                 :link-fn
                 (make-link-fn (fn [v] (c/swap! accu f v))
                               make-result-map))))
 
 
 (defn startwith
-  [start-reactive reactive]
-  (concat start-reactive reactive))
+  [start-r r]
+  (concat start-r r))
 
 
 (defn switch
-  [reactive]
-  {:pre [(reactive? reactive)]
+  [r]
+  {:pre [(reactive? r)]
    :post [(reactive? %)]}
   (let [new-r (eventstream "switch")]
     (add-links! *netref*
-                (make-link "switcher" [reactive] []
+                (make-link "switcher" [r] []
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (let [r (fvalue input-rvts)]
@@ -672,40 +671,40 @@
 
 
 (defn snapshot
-  [f-or-ref-or-value reactive]
-  {:pre [(reactive? reactive)]
+  [f-or-ref-or-value r]
+  {:pre [(reactive? r)]
    :post [(reactive? %)]}
   (let [f (sample-fn f-or-ref-or-value)]
-    (derive-new eventstream "snapshot" [reactive]
+    (derive-new eventstream "snapshot" [r]
                 :link-fn
                 (fn [{:keys [output-reactives]}]
                   {:output-rvts (single-value (f) (first output-reactives))}))))
 
 
 (defn subscribe
-  ([f reactive]
-     (subscribe (gensym "subscriber") f reactive))
-  ([key f reactive]
-     {:pre [(fn-spec? f) (reactive? reactive)]
+  ([f r]
+     (subscribe (gensym "subscriber") f r))
+  ([key f r]
+     {:pre [(fn-spec? f) (reactive? r)]
       :post [(reactive? %)]}
      (let [[executor f] (unpack-fn-spec f)]
-       (add-links! *netref* (assoc (make-link "subscriber" [reactive] []
+       (add-links! *netref* (assoc (make-link "subscriber" [r] []
                                               :link-fn (make-link-fn f (constantly {}))
                                               :executor executor)
                               :subscriber-key key))
-       reactive)))
+       r)))
 
 
 (defn swap!
-  [a f reactive]
-  (subscribe (partial c/swap! a f) reactive))
+  [a f r]
+  (subscribe (partial c/swap! a f) r))
 
 
 (defn take-while
-  [pred reactive]
-  {:pre [(fn-spec? pred) (reactive? reactive)]
+  [pred r]
+  {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
-  (derive-new eventstream "take" [reactive]
+  (derive-new eventstream "take" [r]
               :link-fn
               (fn [{:keys [input-rvts output-reactives] :as input}]
                 (if (apply pred (values input-rvts))
@@ -716,18 +715,18 @@
 
 
 (defn take
-  [no reactive]
-  {:pre [(pos? no) (reactive? reactive)]
+  [no r]
+  {:pre [(pos? no) (reactive? r)]
    :post [(reactive? %)]}
-  (take-while (countdown no) reactive))
+  (take-while (countdown no) r))
 
 
 (defn take-last
-  [no reactive]
-  {:pre [(pos? no) (reactive? reactive)]
+  [no r]
+  {:pre [(pos? no) (reactive? r)]
    :post [(reactive? %)]}
   (let [q (atom (make-queue no))]
-    (derive-new eventstream "take-last" [reactive]
+    (derive-new eventstream "take-last" [r]
                 :link-fn
                 (fn [{:keys [input-rvts]}]
                   (c/swap! q enqueue (fvalue input-rvts)))
@@ -738,11 +737,11 @@
 
 
 (defn throttle
-  [f millis max-queue-size reactive]
-  {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? reactive)]
+  [f millis max-queue-size r]
+  {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? r)]
    :post [(reactive? %)]}
   (let [q     (atom (make-queue max-queue-size))
-        new-r (derive-new eventstream "throttle" [reactive]
+        new-r (derive-new eventstream "throttle" [r]
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (if (>= (-> q deref :queue c/count) max-queue-size)
@@ -756,10 +755,10 @@
 
 
 (defn unsubscribe
-  [key reactive]
+  [key r]
   (remove-links! *netref* #(and (= (:subscriber-key %) key)
-                                (= (link-inputs %) [reactive])))
-  reactive)
+                                (= (link-inputs %) [r])))
+  r)
 
 
 ;; ---------------------------------------------------------------------------
@@ -788,10 +787,10 @@
 
 
 (defn ^:no-doc lift-fn
-  [f & reactives]
-  {:pre [(fn-spec? f) (every? reactive? reactives)]
+  [f & rs]
+  {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
-  (derive-new behavior "lift-fn" reactives
+  (derive-new behavior "lift-fn" rs
               :link-fn
               (make-link-fn f)))
 
@@ -884,42 +883,42 @@
 
 
 (defn err-ignore
-  [reactive]
-  (on-error *netref* reactive
+  [r]
+  (on-error *netref* r
             (fn [result] {})))
 
 
 (defn err-retry-after
-  [millis reactive]
+  [millis r]
   (let [netref *netref*]
-    (on-error *netref* reactive
+    (on-error *netref* r
               (fn [{:keys [input-rvts]}]
                 (sched/once scheduler millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
                 {}))))
 
 
 (defn err-return
-  [x reactive]
-  (on-error *netref* reactive
+  [x r]
+  (on-error *netref* r
             (fn [{:keys [output-reactives]}]
               {:output-rvts (single-value x (first output-reactives))})))
 
 
 (defn err-switch
-  [reactive-after-error reactive]
-  {:pre [(reactive? reactive-after-error) (reactive? reactive)]}
-  (on-error *netref* reactive
+  [r-after-error r]
+  {:pre [(reactive? r-after-error) (reactive? r)]}
+  (on-error *netref* r
             (fn [{:keys [input-reactives]}]
-              {:remove-by #(= (link-outputs %) [reactive])
-               :add [(make-link "err" [reactive-after-error] [reactive]
+              {:remove-by #(= (link-outputs %) [r])
+               :add [(make-link "err" [r-after-error] [r]
                                 :link-fn default-link-fn)]})))
 
 
 (defn err-into
-  [error-reactive reactive]
-  (on-error *netref* reactive
+  [error-r r]
+  (on-error *netref* r
             (fn [input]
-              (enq *netref* {:rvt-map {error-reactive [input (now)]}}))))
+              (enq *netref* {:rvt-map {error-r [input (now)]}}))))
 
 
 ;; ---------------------------------------------------------------------------
