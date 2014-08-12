@@ -21,8 +21,7 @@
 
 
 ;; TODOS
-;; - Remove the mandatory label from the behavior/eventstream factories
-;; - How to prevent scheduled tasks from accumulating?
+;; - How to prevent scheduled tasks from accumulating over longer periods of time?
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 
 
@@ -41,22 +40,29 @@
 ;; Factories / Predicates
 
 (defn behavior
-  ([label]
-     (behavior label nil))
-  ([label value]
+  "Returns a new behavior. 
+  It can have an optional label passed via the :label key."
+  ([value]
+     (behavior value :label (str (gensym "b"))))
+  ([_ label]
+     (behavior nil :label label))
+  ([value _ label]
      (Behavior. label
                 (atom [value (now)])
                 (atom true))))
 
 
 (defn behavior?
+  "Returns true if r is a behavior."
   [r]
   (or (instance? Behavior r)
       (instance? Fnbehavior r)))
 
 
 (defn eventstream
-  [label]
+  "Returns a new eventstream.
+  It can have an optional label passed via the :label key."
+  [& {:keys [label] :or {label (str (gensym "e"))}}]
   (Eventstream. label
                 (atom {:queue (PersistentQueue/EMPTY)
                        :last-occ nil
@@ -65,6 +71,7 @@
 
 
 (defn eventstream?
+  "Returns true if r is an eventstream."
   [r]
   (or (instance? Eventstream r)
       (instance? Seqstream r)))
@@ -163,7 +170,7 @@
    & {:keys [link-fn complete-fn error-fn]
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
-  (let [new-r (factory-fn label)]
+  (let [new-r (factory-fn :label label)]
     (add-links! *netref* (make-link label inputs [new-r]
                                     :link-fn link-fn
                                     :complete-fn complete-fn
@@ -290,7 +297,7 @@
   - an IDeref implementation, or 
   - a value."
   [{:keys [executor f] :as x}]
-  (let [new-r  (eventstream "just")
+  (let [new-r  (eventstream :label "just")
         f      (sample-fn (if (and executor f) f x))
         task-f (fn []
                  (rn/push! new-r (f))
@@ -311,7 +318,7 @@
   - a value."
   [millis {:keys [executor f] :as x}]
   (let [netref  *netref*
-        new-r   (eventstream "sample")
+        new-r   (eventstream :label "sample")
         f       (sample-fn (if (and executor f) f x))
         task-f  (if (and executor f)
                   #(execute executor netref (fn [] (rn/push! netref new-r (f))))
@@ -323,11 +330,11 @@
 (defn seqstream
   "Returns an eventstream that provides all values in collection xs
   and then completes."
-  [xs]
+  [xs & {:keys [label] :or {label (str (gensym "seq"))}}]
   (assoc (Seqstream. (atom {:seq (seq xs)
                             :last-occ nil})
                      true)
-    :label "seq"))
+    :label label))
 
 
 (defn timer
@@ -335,7 +342,7 @@
   integer, starting with 0, incrementing it by 1."
   [millis]
   (let [ticks  (atom 0)
-        new-r  (eventstream "timer")
+        new-r  (eventstream :label "timer")
         netref *netref*]
     (sched/interval scheduler millis millis
                     #(rn/push! netref new-r (c/swap! ticks inc)))
@@ -356,7 +363,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream "amb")
+  (let [new-r   (eventstream :label "amb")
         f       (fn [{:keys [input-reactives input-rvts] :as input}]
                   (let [r (first input-reactives)]
                     {:remove-by #(= (link-outputs %) [new-r])
@@ -453,7 +460,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream "concat")
+  (let [new-r   (eventstream :label "concat")
         state   (atom (make-reactive-queue new-r rs))
         link    (-> (c/swap! state switch-reactive state) :add first)]
     (add-links! *netref* link)
@@ -593,7 +600,7 @@
   {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
-        new-r    (eventstream "flatmap")
+        new-r    (eventstream :label "flatmap")
         state    (atom (make-reactive-queue new-r)) ]
     (add-links! *netref* (make-link "flatmap" [r] [new-r]
                                     :complete-on-remove [new-r]
@@ -679,7 +686,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream "merge")
+  (let [new-r   (eventstream :label "merge")
         links   (->> rs (c/map #(make-link "merge" [%] [new-r])))]
     (apply (partial add-links! *netref*) links)
     new-r))
@@ -756,12 +763,12 @@
 
 
 (defn switch
-  "Returns and eventstream that emits items from the latest reactive
+  "Returns an eventstream that emits items from the latest reactive
   emitted by r."
   [r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
-  (let [new-r (eventstream "switch")]
+  (let [new-r (eventstream :label "switch")]
     (add-links! *netref*
                 (make-link "switcher" [r] [] ;; must not point to an output reactive
                            :link-fn
@@ -774,10 +781,21 @@
 
 
 (defn snapshot
-  [x r]
+  "Returns an eventstream that emits the evaluation of x everytime it
+  receives an item from r.
+
+  x can be: 
+  - an fn-spec with an arbitrary executor and a function f,
+  - a function that is executed synchronously, 
+  - an IDeref implementation, or 
+  - a value."
+  [{:keys [executor f] :as x} r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
-  (let [f (sample-fn x)]
+  (let [netref *netref*
+        f      (if executor
+                 #(execute executor netref f)
+                 (sample-fn x))]
     (derive-new eventstream "snapshot" [r]
                 :link-fn
                 (fn [{:keys [output-reactives]}]
@@ -785,6 +803,11 @@
 
 
 (defn subscribe
+  "Attaches a 1-arg function f to r that is invoked whenever r emits
+  an item.  Instead of a function, f can be an fn-spec containing an
+  arbitrary executor and a function that is executed by the executor
+  on a different thread.
+  Returns r."
   ([f r]
      (subscribe (gensym "subscriber") f r))
   ([key f r]
@@ -799,11 +822,16 @@
 
 
 (defn swap!
+  "Swaps the value of atom a with the value of the result of (f
+  value-of-a item) whenever r emits an item.
+  Returns r."
   [a f r]
   (subscribe (partial c/swap! a f) r))
 
 
 (defn take-while
+  "Returns an eventstream that emits items from r as long as they
+  match predicate pred."
   [pred r]
   {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
@@ -818,6 +846,7 @@
 
 
 (defn take
+  "Returns an eventstream that emits at most n items from r."
   [n r]
   {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
@@ -825,6 +854,7 @@
 
 
 (defn take-last
+  "Returns an eventstream that emits the last n items from r."
   [n r]
   {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
@@ -840,6 +870,10 @@
 
 
 (defn throttle
+  "Returns an eventstream that queues items from r. Emits items with
+  on a fixed time period by applying f to the collection of queued
+  items.  If more than max-queue-size items arrive in a period these
+  are not consumed."
   [f millis max-queue-size r]
   {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? r)]
    :post [(reactive? %)]}
@@ -858,6 +892,8 @@
 
 
 (defn unsubscribe
+  "Detaches the listener function that the key denotes from reactive r.
+  Returns r."
   [key r]
   (remove-links! *netref* #(and (= (:subscriber-key %) key)
                                 (= (link-inputs %) [r])))
@@ -872,7 +908,7 @@
   [label x]
   (if (behavior? x)
      x
-    (behavior label x)))
+    (behavior x :label label)))
 
 
 (defn ^:no-doc and-f
@@ -990,12 +1026,18 @@
 
 
 (defn err-ignore
+  "Attaches an exception-handler to the function calculating the items for r.
+  Quietly ignores any exception, and does not even print a stacktrace..
+  Returns r."
   [r]
   (on-error *netref* r
             (fn [result] {})))
 
 
 (defn err-retry-after
+  "Attaches an exception-handler to the function calculating the items for r.
+  The function evaluation is retried after millis milliseconds.
+  Returns r."
   [millis r]
   (let [netref *netref*]
     (on-error *netref* r
@@ -1005,6 +1047,9 @@
 
 
 (defn err-return
+  "Attaches an exception-handler to the function calculating the items for r.
+  Upon exception r emits x.
+  Returns r."
   [x r]
   (on-error *netref* r
             (fn [{:keys [output-reactives]}]
@@ -1012,6 +1057,9 @@
 
 
 (defn err-switch
+  "Attaches an exception-handler to the function calculating the items for r.
+  Upon exception r is permanently switched to follow reactive r-after-error.
+  Returns r."
   [r-after-error r]
   {:pre [(reactive? r-after-error) (reactive? r)]}
   (on-error *netref* r
@@ -1022,6 +1070,10 @@
 
 
 (defn err-into
+  "Attaches an exception-handler to the function calculating the items for r.
+  Redirects a map containing the exception in an :exception entry and
+  the input values in an :input-rvts entry to the reactive error-r.
+  Returns r."
   [error-r r]
   (on-error *netref* r
             (fn [input]
