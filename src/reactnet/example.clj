@@ -1,7 +1,9 @@
 (ns reactnet.example
   (:require [reactnet.core :as rn]
             [reactnet.reactives :as rs]
-            [reactnet.netrefs :as refs]))
+            [reactnet.netrefs :as refs]
+            [clojure.java.shell :refer [sh]]
+            [clojure.java.io :as io]))
 
 
 ;; example link factories
@@ -52,8 +54,8 @@
 
 (Thread/sleep 50)
 
-;; n holds the network in an agent thus every operation is send to
-;; that agent which means network updates / propagation happen
+;; n holds the network in an agent, thus every operation is sent to
+;; that agent, which means network updates / propagation happen
 ;; asynchronously
 
 ;; you can spy at the networks topology and reactives state
@@ -69,6 +71,9 @@
 ;  L7 [z] -- subscribe --> [] READY
 ;= nil
 
+;; you can also create a Graphviz output from a network
+;; written to /tmp
+#_ (sh "dot" "-Tpng" "-o/tmp/g.png" :in (rn/dot n))
 
 
 ; deref'ing zs shows that z already provided an initial value
@@ -91,5 +96,6 @@
 ;; although the update of x will trigger the update of x+y and x*(x+y)
 ;; only one update of z happens.
 
-
+;; to remove all links from the network you can reset it:
+#_ (rn/reset-network! n)
 

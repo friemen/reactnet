@@ -183,6 +183,18 @@ We can inspect it using `(pp netref)` ...
 ;= nil
 ```
 
+... or we can create a Graphviz dot representation of the network
+using `(dot netref)` and use `clojure.java.shell/sh` to produce
+an image
+
+```clojure
+(sh "dot" "-Tpng" "-o/tmp/g.png" :in (rn/dot n))
+```
+
+... like this
+
+![dot output](images/dot.png)
+
 ... and `zs` already contains the first update to `z`.
 
 ```clojure
@@ -205,6 +217,13 @@ changes to `x` cause two links to be re-evaluated (the `+` and the
 
 This property is critical for example in case updates to a behavior
 cause side-effects.
+
+Finally, to reset the network we can use `reset-network`
+
+```clojure
+(rn/reset-network! n)
+;= :reset
+```
 
 ### And now?
 

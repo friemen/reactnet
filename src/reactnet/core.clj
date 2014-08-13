@@ -4,14 +4,6 @@
   (:import [java.lang.ref WeakReference]
            [java.util WeakHashMap]))
 
-;; TODOs
-;; - Proper logging instead of dump
-;; - Preserve somehow the timestamp when applying a link function:
-;;   Use the max timestamp of all input values.
-;; - Add pause! and resume! for the netref
-;; - Graphviz visualization of the network
-;; - Support interceptor?
-
 
 ;; ---------------------------------------------------------------------------
 ;; Concepts
@@ -347,11 +339,10 @@
 
 (def ^:no-doc debug? false)
 
-(defn ^:no-doc dump
+(defmacro ^:no-doc dump
   [& args]
-  (when debug?
-    (apply println args))
-  (first args))
+  `(when debug?
+     (println ~@args)))
 
 
 (defn ^:no-doc dump-links
@@ -884,6 +875,40 @@
                                                      keys
                                                      (map str-react)))
                      "\nLinks\n" (s/join "\n" (map str-link links)))))))
+
+
+(defn dot
+  "Returns a GraphViz dot representation of the network as string."
+  ([]
+     (dot *netref*))
+  ([netref]
+     (let [r-style "shape=box, regular=1, style=filled, fillcolor=white"
+           l-style "shape=oval, width=0.5, style=filled, fillcolor=grey"
+           {:keys [id links rid-map]} (network netref)
+           id-str (fn [x]
+                    (if (reactive? x)
+                      (str "\"r:" (:label x) "\"")
+                      (str "\"l:" (:label x) "\"")))
+           node-str (fn [style x]
+                      (str (id-str x) " [label=\"" (:label x) "\", " style "];\n"))]
+       (str "digraph " id " {\n"
+            (->> (keys rid-map)
+                 (map (partial node-str r-style))
+                 sort
+                 (apply str))
+            (->> links
+                 (map (partial node-str l-style))
+                 sort
+                 (apply str))
+            (->> links
+                 (mapcat (fn [l]
+                           (concat (map vector (repeat l) (link-outputs l))
+                                   (map vector (link-inputs l) (repeat l)))))
+                 (map (fn [[f t]]
+                        (str (id-str f) " -> " (id-str t) ";\n")))
+                 sort
+                 (apply str))
+            "}\n"))))
 
 
 (defmacro with-netref

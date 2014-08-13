@@ -25,7 +25,7 @@
 
 (defmacro with-network
   [links & exprs]
-  `(rn/with-netref (refs/atom-netref (rn/make-network "" ~links))
+  `(rn/with-netref (refs/atom-netref (rn/make-network "test" ~links))
      ~@exprs))
 
 (defn push!
@@ -359,3 +359,31 @@
       (is (= [] @r))
       (Thread/sleep 100)
       (is (= [42] @r)))))
+
+
+(def dot-graph "digraph test {
+\"r:x\" [label=\"x\", shape=box, regular=1, style=filled, fillcolor=white];
+\"r:x+2\" [label=\"x+2\", shape=box, regular=1, style=filled, fillcolor=white];
+\"r:z\" [label=\"z\", shape=box, regular=1, style=filled, fillcolor=white];
+\"l:(partial + 2)\" [label=\"(partial + 2)\", shape=oval, width=0.5, style=filled, fillcolor=grey];
+\"l:(partial swap! r conj)\" [label=\"(partial swap! r conj)\", shape=oval, width=0.5, style=filled, fillcolor=grey];
+\"l:*\" [label=\"*\", shape=oval, width=0.5, style=filled, fillcolor=grey];
+\"l:(partial + 2)\" -> \"r:x+2\";
+\"l:*\" -> \"r:z\";
+\"r:x\" -> \"l:(partial + 2)\";
+\"r:x\" -> \"l:*\";
+\"r:x+2\" -> \"l:*\";
+\"r:z\" -> \"l:(partial swap! r conj)\";
+}
+")
+
+(deftest dot-test
+  (let [r    (atom [])
+        x    (behavior "x" 2)
+        x+2  (behavior "x+2" nil)
+        z    (behavior "z" 0)]
+    (with-network [(link (partial + 2) [x] [x+2])
+                   (link * [x+2 x] [z])
+                   (link (partial swap! r conj) [z] [])]
+      (is (= dot-graph (rn/dot))))))
+
