@@ -449,13 +449,12 @@
 
 
 (defn ^:no-doc dead?
-  "Returns true for a link if has not inputs, or at least one of it's
-  inputs is completed, or all outputs are completed. Empty outputs does
+  "Returns true for a link if it has no inputs, or at least one of it's
+  inputs is completed, or all outputs are completed. Having no outputs does
   not count as 'all outputs completed'."
   [link]
   (let [inputs (link-inputs link)
         outputs (link-outputs link)]
-    (when (some nil? inputs) (println "Link" (:label link) "has nil inputs"))
     (or (empty? inputs)
         (some nil? inputs)
         (some completed? inputs)

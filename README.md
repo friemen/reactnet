@@ -218,7 +218,7 @@ changes to `x` cause two links to be re-evaluated (the `+` and the
 This property is critical for example in case updates to a behavior
 cause side-effects.
 
-Finally, to reset the network we can use `reset-network`
+Finally, to reset the network we can use `(reset-network! netref)`
 
 ```clojure
 (rn/reset-network! n)
@@ -519,7 +519,7 @@ containing an `:exception` entry the error handler is invoked with the
 The error handler can use the same entries as the link-function. After
 the error handler has been invoked the `:exception` entry has no
 further effect. Instead of directly returning values the error handler
-can schedule a task or push values via the network refs `update`
+can schedule a task or push values via the network refs `enq`
 function.
 
 
@@ -552,7 +552,7 @@ TODO Show some implementations of reactor
 TODO Give some more background on
 
 * Topological levels
-* WeakReferences for outputs
+* WeakHashMap / WeakReferences for outputs
 * Backpressure
 
 
