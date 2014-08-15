@@ -84,7 +84,8 @@
   [& rvs]
   (doseq [[r v] (partition 2 rvs)]
     (assert (reactive? r))
-    (rn/push! r v)))
+    (rn/push! r v))
+  (last rvs))
 
 
 (defn complete!
@@ -310,6 +311,7 @@
 
 (defn sample
   "Returns an eventstream that repeatedly evaluates x with a fixed period.
+  The periodic task is cancelled when the eventstream is completed.
 
   x can be: 
   - an fn-spec with an arbitrary executor and a function f,
@@ -320,10 +322,14 @@
   (let [netref  *netref*
         new-r   (eventstream :label "sample")
         f       (sample-fn (if (and executor f) f x))
+        task    (atom nil)
+        push-f  (fn [] (if (completed? new-r)
+                         (sched/cancel @task)
+                         (rn/push! netref new-r (f))))
         task-f  (if (and executor f)
-                  #(execute executor netref (fn [] (rn/push! netref new-r (f))))
-                  #(rn/push! netref new-r (f)))]
-    (sched/interval scheduler millis task-f)
+                  #(execute executor netref push-f)
+                  push-f)]
+    (reset! task (sched/interval scheduler millis task-f))
     new-r))
 
 
@@ -927,8 +933,6 @@
 
 (defn ^:no-doc lift-fn
   [f & rs]
-  {:pre [(fn-spec? f) (every? reactive? rs)]
-   :post [(reactive? %)]}
   (derive-new behavior "lift-fn" rs
               :link-fn
               (make-link-fn f)))

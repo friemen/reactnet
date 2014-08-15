@@ -534,9 +534,9 @@
 
 
 (defn- update-links
-  "Removes links specified by the predicate or set and conjoins links
-  to the networks links. Returns an updated network, and flags
-  with :rebuild? if a rebuild is necessary."
+  "Removes links specified by the predicate or set and conjoins
+  new-links to the networks links. Returns an updated network, and
+  flags with :rebuild? if a rebuild is necessary."
   [{:keys [links] :as n} remove-by-pred new-links]
   (let [[links-to-remove remaining-links] (dissect remove-by-pred links)]
     (when (seq links-to-remove)
@@ -793,7 +793,7 @@
                                                   (not= ::completed v)))
                                         (map first)))
                  (complete-pending)
-                 (propagate! (deliver-values! rvt-map)))   
+                 (propagate! add (deliver-values! rvt-map)))   
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))

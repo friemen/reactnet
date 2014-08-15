@@ -92,7 +92,14 @@
       (reset! a 1)
       (wait 400)
       (is (<= 4 (count @r)))
-      (is (= [0 0 1 1] (take 4 @r))))))
+      (is (= [0 0 1 1] (take 4 @r)))))
+  (testing "Cancel sample task"
+    (let [r   (atom [])
+          s   (->> 42 (r/sample 100) (r/swap! r conj))]
+      (wait 150)
+      (r/complete! s)
+      (wait 200)
+      (is (<= 2 (count @r))))))
 
 
 (deftest timer-test
@@ -497,11 +504,11 @@
 
 (deftest lift-if-test
   (let [x (r/behavior 2 :label "x")
-        z (r/lift (if (> x 2) "x > 2" "x <= 2"))]
+        z (r/lift (if (> x 2) (dec x) (inc x)))]
     (wait)
-    (is (= @z "x <= 2"))
+    (is (= @z 3))
     (push-and-wait! x 3)
-    (is (= @z "x > 2"))))
+    (is (= @z 2))))
 
 
 (deftest lift-let-test
