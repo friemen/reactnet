@@ -1,33 +1,37 @@
 (ns reactnet.netrefs
   "Default INetworkRef implementations: Agent and Atom based."
-  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate!]]))
+  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate! pending?]]))
 
 
-(defn- sleep-if-necessary
-  "Puts the current thread to sleep if the queue of pending agent
-  computations exceeds max-items."
-  [n-agent max-items millis]
-  (when (< max-items (.getQueueCount n-agent))
-    (Thread/sleep millis)))
 
 
-(defrecord AgentNetref [n-agent]
+(defrecord AgentNetref [max-queue-size n-agent]
   INetworkRef
   (enq [this stimulus]
-    (sleep-if-necessary n-agent 1000 100)
+    (when (>= (.getQueueCount n-agent) max-queue-size)
+      ;; don't add more values to already pending reactives
+      (when (and (seq (:rvt-map stimulus))
+                 (every? pending? (keys (:rvt-map stimulus))))
+        (throw (IllegalStateException. (str "Cannot enqueue more than " max-queue-size
+                                            " stimuli, failed for reactives "
+                                            (->> stimulus :rvt-map keys (map :label)))))))
     (send-off n-agent (fn [n]
                         (binding [*netref* this]
-                          (update-and-propagate! n stimulus))))
+                          (let [n (update-and-propagate! n stimulus)]
+                            (when (agent-error n-agent)
+                              (println (agent-error n-agent)))
+                            n))))
     this)
   (network [this]
     @n-agent))
 
 
+(def max-queue-size 1000)
+
 (defn agent-netref
   "Wraps and returns the network in an agent based NetworkRef."
   [network]
-  (AgentNetref. (agent network
-                       :error-handler (fn [_ ex] (.printStackTrace ex)))))
+  (AgentNetref. max-queue-size (agent network)))
 
 
 (defrecord AtomNetref [n-atom]

@@ -348,17 +348,60 @@
                       (Thread/sleep 100)
                       (try (f)
                            (catch Exception ex (.printStackTrace ex) ex))))))
-        e1    (eventstream "e1")
+        e     (eventstream "e")
         r     (atom [])]
     (rn/with-netref
       (refs/agent-netref
-       (rn/make-network "test" [(assoc (link (partial swap! r conj) [e1] [])
+       (rn/make-network "test" [(assoc (link (partial swap! r conj) [e] [])
                                   :executor exec)]))
-      (push! e1 42)
+      (push! e 42)
       (Thread/sleep 50)
       (is (= [] @r))
       (Thread/sleep 100)
       (is (= [42] @r)))))
+
+
+(deftest backpressure-test
+  (with-redefs [reactnet.netrefs/max-queue-size 15
+                reactnet.reactives/max-queue-size 10]
+    (testing "External stimuli are rejected"
+      (let [e  (eventstream "e")
+            r  (atom [])]
+        
+        (rn/with-netref
+          (refs/agent-netref
+           (rn/make-network "test" [(link (fn [x]
+                                            (Thread/sleep 10)
+                                            (swap! r conj x))
+                                          [e] [])]))
+          (apply push! (cons e (range 10)))
+          (is (thrown? IllegalStateException (apply push! (cons e (range 10))))))))
+    (testing "Internal stimuli from deliveries to a stream are enqueued"
+      (let [e1 (eventstream "e1")
+            e2 (eventstream "e2")
+            e3 (eventstream "e3")
+            r  (atom [])]
+        (rn/with-netref
+          (refs/agent-netref
+           (rn/make-network "test" [(rn/make-link "e1->e2" [e1] [e2]
+                                                  :link-fn (fn [{:keys [input-rvts output-reactives] :as input}]
+                                                             {:output-rvts (rn/enqueue-values
+                                                                            (range (rn/fvalue input-rvts))
+                                                                            (first output-reactives))}))
+                                    (link (partial swap! r conj) [e2 e3] [])]))
+          (push! e1 15)
+          (Thread/sleep 50)
+          (is (= 5 (-> rn/*netref* :n-agent .getQueueCount)))
+          (dotimes [i 15]
+            (Thread/sleep 10)
+            (push! e3 i))
+          (Thread/sleep 300)
+          (is (= 30 (count @r)))
+
+          ;; this will exceed queue capacity of e1 plus the agents queue
+          (push! e1 30)
+          (Thread/sleep 50)
+          (is (agent-error (:n-agent rn/*netref*))))))))
 
 
 (def dot-graph "digraph test {

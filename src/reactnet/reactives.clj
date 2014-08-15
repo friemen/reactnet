@@ -114,7 +114,7 @@
   (completed? [this]
     false)
   (consume! [this]
-    nil)                                ;TODO
+    [(f) (rn/now)])
   (deliver! [r value-timestamp-pair]
     (throw (UnsupportedOperationException. "Unable to deliver a value to a function")))
   clojure.lang.IDeref
@@ -124,6 +124,8 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Factories
+
+(def max-queue-size 1000)
 
 (defn behavior
   [label value]
@@ -138,7 +140,7 @@
                 (atom {:queue (clojure.lang.PersistentQueue/EMPTY)
                        :last-value nil
                        :completed false})
-                1000))
+                max-queue-size))
 
 
 (defn seqstream

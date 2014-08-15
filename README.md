@@ -620,6 +620,59 @@ In addition the network maintains a `:pending-completions` seq that
 contains those reactives which are to be completed unless they appear
 in the networks `:dont-complete` map.
 
+### Backpressure
+
+The network can accumulate RVTs/updates in two places:
+
+* The `(enq netref stimulus)` function is by default implemented using
+  an agent's `send-off`, which enqueues computations in an unbounded
+  queue.
+* IReactive implementations like an eventstream that receive values
+  via `(deliver! r value-timestamp-pair)` usually have to enqueue
+  those to keep them for links which may not be ready for some
+  period of time.
+
+New RVTs originate from two sources:
+
+* External stimuli via `push!` invocations are created by scheduled
+  sampling, by incoming requests, or by events as triggered from a
+  keyboard or mouse.
+* Link functions themselves can produce an arbitrary number of values
+  within the network, for example a mapcat/flatmap may collect values
+  by calling external services. If these link functions were executed
+  asynchronously the results are enqueued using `enq`. In case of
+  synchronous execution the values are passed via `deliver!` to the
+  target reactives.
+
+To produce backpressure one needs to either block the thread creating
+external stimuli or, alternatively, a `push!` invocation can throw an
+exception.
+
+In any case, it's important to never delay or block the thread
+processing the propagation/update cycle as this would apparently
+worsen congestion within the network.
+
+Here's the approach of reactnet:
+
+The goal is to avoid bad surprises and give external systems /
+operations a chance to take note of a problem.
+
+An IReactive implementation must not accumulate values
+indefinitely. It has either a queue of limited size, throwing an
+exception when this is exhausted, or it omits existing or new
+values. An eventstream would typically be implemented using a queue
+with a max size, whereas a behavior overwrites any existing value
+whenever a new arrives.
+
+In addition, the queue behind `enq` is monitored, and `enq` throws an
+exception if the maximum limit is reached. This way, new stimuli that
+add values to already pending reactives will not get accepted until
+the workload on the network falls below the maximum limit.
+
+Whenever `deliver!` throws an exception, the results are enqueued as
+stimuli via `enq`. If this also fails the propagation cycle will
+terminate with an exception, which will lead to an agent in an
+erroneous state.
 
 
 ## License

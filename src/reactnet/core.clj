@@ -679,7 +679,9 @@
   (doseq [[r vt] rvt-map]
     (if (completed? r)
       (dump "WARNING: trying to deliver" vt "into completed" r)
-      (deliver! r vt)))
+      (try (deliver! r vt)
+           (catch IllegalStateException ex
+             (enq *netref* {:rvt-map {r vt}})))))
   (->> rvt-map (map first) (filter pending?)))
 
 
