@@ -19,8 +19,8 @@ Key ideas of reactnet are:
 * Updates to the network (add / remove links) or propagations of
   events are enqueued and processed sequentially in a separate
   thread.
-* To avoid blocking the propagation thread, links can invoke functions
-  asynchronously.
+* To avoid blocking the propagation thread, link functions can be
+  invoked asynchronously.
 * Value propagation is done along the topological order of reactives
   and links.
 * There can be many independent networks, processed by independant
@@ -132,10 +132,11 @@ were external stimuli. This means we can make trade-offs between
 consistency and responsiveness at the granularity of specific links.
 
 
-Let's define some reactives. *Behaviors* are time-varying values, in
-other words: variables. They always have a value. This is the main
-difference to *Eventstreams* which can be seen as sequences of
-value/timestamp pairs. Once a value is consumed it's gone.
+Let's define some reactives. *Behaviors* in the sense of reactnet are
+like variables that know if their value has recently changed. They
+can always provide the current value. This is the main difference to
+*Eventstreams* which can be seen as sequences of value/timestamp
+pairs. Once a value is consumed it's gone.
 
 For now we stick to Behaviors. Here we create four of them, which are not
 connected to any network and independent of each other:
@@ -215,8 +216,9 @@ If we deref `zs` then we find `[3 24]`. As you can see, although
 changes to `x` cause two links to be re-evaluated (the `+` and the
 `*`), only one update of the result `zs` happens.
 
-This property is critical for example in case updates to a behavior
-cause side-effects.
+This property is critical in case updates to a behavior cause
+non-idempotent side-effects (e.g. sending a mail or adding a database
+record).
 
 Finally, to reset the network we can use `(reset-network! netref)`
 
@@ -266,8 +268,8 @@ foundation of this library.
 
 ### Reactive
 
-A reactive is something that takes and provides values, basically an
-abstraction from classical FRP concepts *behavior* and
+A reactive is something that takes and provides values, basically a
+generalization of classical FRP concepts *behavior* and
 *events(tream)*. The following protocol shows the functions that the
 propagation algorithm interacts with:
 
@@ -445,8 +447,8 @@ this link is removed from the network by listing them in the value for
 they are considered dead this will lead to automatic completion.
 
 
-Creating the three functions boils down to handling the Result map
-properly.
+Creating the three functions boils down to proper handling of the
+Result map.
 
 ### Link function
 
@@ -553,7 +555,6 @@ TODO Give some more background on
 
 * Topological levels
 * WeakHashMap / WeakReferences for outputs
-* Backpressure
 
 
 ### The propagation / network update algorithm
@@ -665,7 +666,7 @@ with a max size, whereas a behavior overwrites any existing value
 whenever a new arrives.
 
 In addition, the queue behind `enq` is monitored, and `enq` throws an
-exception if the maximum limit is reached. This way, new stimuli that
+exception when the limit is reached. This way, new stimuli that
 add values to already pending reactives will not get accepted until
 the workload on the network falls below the maximum limit.
 
