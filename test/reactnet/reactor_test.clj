@@ -12,8 +12,8 @@
 (defn with-clean-network
   [f]
   (rn/with-netref (refs/agent-netref (rn/make-network "unittests" []))
-    (f))
-  (sched/cancel-all r/scheduler))
+    (f)
+    (-> rn/*netref* rn/scheduler sched/cancel-all)))
 
 (use-fixtures :each with-clean-network)
 

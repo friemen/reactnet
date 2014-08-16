@@ -1,11 +1,12 @@
 (ns reactnet.netrefs
   "Default INetworkRef implementations: Agent and Atom based."
-  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate! pending?]]))
+  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate! pending?]]
+            [reactnet.scheduler :as sched]))
 
 
 
 
-(defrecord AgentNetref [max-queue-size n-agent]
+(defrecord AgentNetref [max-queue-size n-agent sched]
   INetworkRef
   (enq [this stimulus]
     (when (>= (.getQueueCount n-agent) max-queue-size)
@@ -22,6 +23,8 @@
                               (println (agent-error n-agent)))
                             n))))
     this)
+  (scheduler [this]
+    sched)
   (network [this]
     @n-agent))
 
@@ -31,16 +34,18 @@
 (defn agent-netref
   "Wraps and returns the network in an agent based NetworkRef."
   [network]
-  (AgentNetref. max-queue-size (agent network)))
+  (AgentNetref. max-queue-size (agent network) (sched/scheduler 5)))
 
 
-(defrecord AtomNetref [n-atom]
+(defrecord AtomNetref [n-atom sched]
   INetworkRef
   (enq [this stimulus]
     (binding [*netref* this]
       (swap! n-atom (fn [n]
                       (update-and-propagate! n stimulus)))
       this))
+  (scheduler [this]
+    sched)
   (network [this]
     @n-atom))
 
@@ -49,7 +54,7 @@
   "Wraps and returns the network in an atom based NetworkRef. Only
   used for unit testing."
   [network]
-  (AtomNetref. (atom network)))
+  (AtomNetref. (atom network) (sched/scheduler 5)))
 
 
 

@@ -12,7 +12,7 @@
              :refer [add-links! broadcast-value completed? default-link-fn
                      enq enqueue-values execute fvalue link-inputs
                      link-outputs make-link make-network *netref* now on-error
-                     reactive? remove-links! single-value values zip-values]
+                     reactive? remove-links! scheduler single-value values zip-values]
              :exclude [push! complete!]]
             [reactnet.netrefs :refer [agent-netref]])
   (:import [clojure.lang PersistentQueue]
@@ -21,7 +21,6 @@
 
 
 ;; TODOS
-;; - Get scheduler from a netref, instead of keeping one global instance 
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 
 
@@ -32,8 +31,6 @@
 (alter-var-root #'reactnet.core/*netref*
                 (fn [_]
                   (agent-netref (make-network "default" []))))
-
-(defonce ^:no-doc scheduler (sched/scheduler 5))
 
 
 ;; ---------------------------------------------------------------------------
@@ -117,7 +114,7 @@
   ([]
      (reset-network! *netref*))
   ([n]
-     (sched/cancel-all scheduler)
+     (-> n scheduler sched/cancel-all)
      (rn/reset-network! n)))
 
 
@@ -341,6 +338,7 @@
   - a value."
   [millis {:keys [executor f] :as x}]
   (let [netref  *netref*
+        s       (scheduler netref)
         new-r   (eventstream :label "sample")
         f       (sample-fn (if (and executor f) f x))
         task    (atom nil)
@@ -350,7 +348,7 @@
         task-f  (if (and executor f)
                   #(execute executor netref push-f)
                   push-f)]
-    (reset! task (sched/interval scheduler millis task-f))
+    (reset! task (sched/interval s millis task-f))
     new-r))
 
 
@@ -369,15 +367,16 @@
   value, starting with 0, incrementing it by 1.
   The periodic task is cancelled when the eventstream is completed."
   [millis]
-  (let [netref *netref*
-        ticks  (atom 0)
-        new-r  (behavior 0 :label "timer")
-        task   (atom nil)
-        task-f (fn []
-                 (if (completed? new-r)
-                   (sched/cancel @task)
-                   (rn/push! netref new-r (c/swap! ticks inc))))]
-    (reset! task (sched/interval scheduler millis millis task-f))
+  (let [netref  *netref*
+        s       (scheduler netref)
+        ticks   (atom 0)
+        new-r   (behavior 0 :label "timer")
+        task    (atom nil)
+        task-f  (fn []
+                  (if (completed? new-r)
+                    (sched/cancel @task)
+                    (rn/push! netref new-r (c/swap! ticks inc))))]
+    (reset! task (sched/interval s millis millis task-f))
     new-r))
 
 
@@ -422,15 +421,16 @@
   [n millis r]  
   {:pre [(number? n) (number? millis) (reactive? r)]
    :post [(reactive? %)]}
-  (let [b      (atom {:queue [] :dequeued nil})
+  (let [netref *netref*
+        s      (scheduler netref)
+        b      (atom {:queue [] :dequeued nil})
         task   (atom nil)
         enq    (fn [{:keys [queue] :as q} x]
                  (if (and (> n 0) (>= (c/count queue) n))
                    (assoc q :queue [x] :dequeued queue)
                    (assoc q :queue (conj queue x) :dequeued nil)))
         deq    (fn [{:keys [queue] :as q}]
-                 (assoc q :queue [] :dequeued queue))
-        netref *netref*]
+                 (assoc q :queue [] :dequeued queue))]
     (derive-new eventstream "buffer" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
@@ -439,7 +439,7 @@
                          queue :queue} (c/swap! b enq (fvalue input-rvts))]
                     (when (and (= 1 (c/count queue)) (> millis 0))
                       (c/swap! task (fn [_]
-                                    (sched/once scheduler millis
+                                    (sched/once s millis
                                                 (fn []
                                                   (let [vs (:dequeued (c/swap! b deq))]
                                                     (when (seq vs)
@@ -527,7 +527,8 @@
                         v      (fvalue input-rvts)
                         old-t  @task
                         netref *netref*
-                        new-t  (sched/once scheduler millis #(rn/push! netref output v))]
+                        s      (scheduler netref)
+                        new-t  (sched/once s millis #(rn/push! netref output v))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
                     (reset! task new-t)
@@ -540,13 +541,14 @@
   [millis r]
   {:pre [(pos? millis) (reactive? r)]
    :post [(reactive? %)]}
-  (let [netref *netref*]
+  (let [netref *netref*
+        s      (scheduler netref)]
     (derive-new eventstream "delay" [r]
                 :link-fn
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)]
-                    (sched/once scheduler millis #(rn/push! netref output v))
+                    (sched/once s millis #(rn/push! netref output v))
                     nil)))))
 
 
@@ -911,6 +913,7 @@
   {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? r)]
    :post [(reactive? %)]}
   (let [netref *netref*
+        s      (scheduler netref)
         q      (atom (make-queue max-queue-size))
         new-r  (derive-new eventstream "throttle" [r]
                            :link-fn
@@ -925,7 +928,7 @@
                    (let [vs (:dequeued (c/swap! q dequeue-all))]
                      (when-not (empty? vs)
                        (rn/push! netref new-r (f vs))))))]
-    (reset! task (sched/interval scheduler millis millis task-f))
+    (reset! task (sched/interval s millis millis task-f))
     new-r))
 
 
@@ -1075,10 +1078,11 @@
   The function evaluation is retried after millis milliseconds.
   Returns r."
   [millis r]
-  (let [netref *netref*]
+  (let [netref *netref*
+        s      (scheduler netref)]
     (on-error *netref* r
               (fn [{:keys [input-rvts]}]
-                (sched/once scheduler millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
+                (sched/once s millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
                 {}))))
 
 

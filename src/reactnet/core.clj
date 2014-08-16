@@ -5,10 +5,6 @@
            [java.util WeakHashMap]))
 
 
-;; TODO
-;; Make a scheduler part of a netref?
-
-
 ;; ---------------------------------------------------------------------------
 ;; Concepts
 
@@ -111,6 +107,8 @@
 
   An implementation should delegate to update-and-propagate!
   function.")
+  (scheduler [netref]
+    "Return the scheduler.")
   (network [netref]
     "Return the network map."))
 

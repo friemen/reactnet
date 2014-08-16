@@ -399,6 +399,8 @@ propagation/updates to it are enqueued.
     new links and propagate the values in the {Reactive -> [v t]} map.
     An implementation should delegate to update-and-propagate!
     function.")
+  (scheduler [netref]
+    "Return the scheduler.")
   (network [netref]
     "Return the network map."))
 ```
