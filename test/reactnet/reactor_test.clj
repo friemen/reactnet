@@ -104,9 +104,12 @@
 
 (deftest timer-test
   (let [r   (atom [])
-        t   (->> (r/timer 200) (r/swap! r conj))]
-    (wait 1000)
-    (is (= [1 2 3 4] (take 4 @r)))))
+        t   (->> (r/timer 100) (r/swap! r conj))]
+    (wait 500)
+    (r/complete! t)
+    (is (= [0 1 2 3] (take 4 @r)))
+    (wait 200)
+    (is (<= (count @r) 6))))
 
 
 ;; ---------------------------------------------------------------------------

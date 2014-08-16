@@ -49,6 +49,7 @@
   ([value _ label]
      (Behavior. label
                 (atom [value (now)])
+                (atom true)
                 (atom true))))
 
 
@@ -80,12 +81,30 @@
 ;; ---------------------------------------------------------------------------
 ;; Push! Complete! Reset
 
+
+(defn network
+  ([]
+     (network (str (gensym "network"))))
+  ([id]
+     (agent-netref
+      (make-network id []))))
+
+
+(defmacro with-network
+  [n & exprs]
+  `(binding [reactnet.core/*netref* ~n]
+     ~@exprs))
+
+
 (defn push!
-  [& rvs]
-  (doseq [[r v] (partition 2 rvs)]
-    (assert (reactive? r))
-    (rn/push! r v))
-  (last rvs))
+  ([r v]
+     (push! *netref* r v))
+  ([n r v & rvs]
+     (rn/push! n r v)
+     (doseq [[r v] (partition 2 rvs)]
+       (assert (reactive? r))
+       (rn/push! r v))
+     v))
 
 
 (defn complete!
@@ -95,9 +114,11 @@
 
 
 (defn reset-network!
-  []
-  (sched/cancel-all scheduler)
-  (rn/reset-network! *netref*))
+  ([]
+     (reset-network! *netref*))
+  ([n]
+     (sched/cancel-all scheduler)
+     (rn/reset-network! n)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -344,14 +365,18 @@
 
 
 (defn timer
-  "Returns an eventstream that emits every millis milliseconds an
-  integer, starting with 0, incrementing it by 1."
+  "Returns a behavior that changes every millis milliseconds it's
+  value, starting with 0, incrementing it by 1."
   [millis]
-  (let [ticks  (atom 0)
-        new-r  (eventstream :label "timer")
-        netref *netref*]
-    (sched/interval scheduler millis millis
-                    #(rn/push! netref new-r (c/swap! ticks inc)))
+  (let [netref *netref*
+        ticks  (atom 0)
+        new-r  (behavior 0 :label "timer")
+        task   (atom nil)
+        task-f (fn []
+                 (if (completed? new-r)
+                   (sched/cancel @task)
+                   (rn/push! netref new-r (c/swap! ticks inc))))]
+    (reset! task (sched/interval scheduler millis millis task-f))
     new-r))
 
 
@@ -668,7 +693,7 @@
 
 (defn match
   "Returns an eventstream that emits match-value and completes as soon
-  as pred applied to items of r is true. Otherwise emits default-value
+  as pred applied to item of r is true. Otherwise emits default-value
   on completion if no item in r matched pred."
   ([pred match-value default-value r]
   {:pre [(fn-spec? pred) (reactive? r)]

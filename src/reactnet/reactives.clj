@@ -7,7 +7,7 @@
 ;; A Behavior implementation of the IReactive protocol
 
 
-(defrecord Behavior [label a new?]
+(defrecord Behavior [label a new? live?]
   IReactive
   (next-value [this]
     @a)
@@ -16,16 +16,20 @@
   (pending? [r]
     @new?)
   (completed? [r]
-    (= ::reactnet.core/completed (first @a)))
+    (not @live?))
   (consume! [this]
     (reset! new? false)
     (rn/dump "CONSUME!" (first @a) "<-" (:label this))
     @a)
   (deliver! [this [value timestamp]]
-    (when (not= (first @a) value)
-      (rn/dump "DELIVER!" (:label this) "<-" value)
-      (reset! a [value timestamp])
-      (reset! new? true)))
+    (when-not @live?
+      (throw (IllegalStateException. (str "Behavior '" label "' is completed"))))
+    (if (= :reactnet.core/completed value)
+      (reset! live? false)
+      (when (not= (first @a) value)
+        (rn/dump "DELIVER!" (:label this) "<-" value)
+        (reset! a [value timestamp])
+        (reset! new? true))))
   clojure.lang.IDeref
   (deref [this]
     (first @a)))
@@ -131,6 +135,7 @@
   [label value]
   (Behavior. label
              (atom [value (rn/now)])
+             (atom true)
              (atom true)))
 
 
