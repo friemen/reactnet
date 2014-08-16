@@ -5,6 +5,10 @@
            [java.util WeakHashMap]))
 
 
+;; TODO
+;; Make a scheduler part of a netref?
+
+
 ;; ---------------------------------------------------------------------------
 ;; Concepts
 

@@ -21,7 +21,7 @@
 
 
 ;; TODOS
-;; - How to prevent scheduled tasks from accumulating over longer periods of time?
+;; - Get scheduler from a netref, instead of keeping one global instance 
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 
 
@@ -366,7 +366,8 @@
 
 (defn timer
   "Returns a behavior that changes every millis milliseconds it's
-  value, starting with 0, incrementing it by 1."
+  value, starting with 0, incrementing it by 1.
+  The periodic task is cancelled when the eventstream is completed."
   [millis]
   (let [netref *netref*
         ticks  (atom 0)
@@ -904,21 +905,27 @@
   "Returns an eventstream that queues items from r. Emits items with
   on a fixed time period by applying f to the collection of queued
   items.  If more than max-queue-size items arrive in a period these
-  are not consumed."
+  are not consumed.
+  The periodic task is cancelled when the eventstream is completed."
   [f millis max-queue-size r]
   {:pre [(fn-spec? f) (pos? millis) (pos? max-queue-size) (reactive? r)]
    :post [(reactive? %)]}
-  (let [q     (atom (make-queue max-queue-size))
-        new-r (derive-new eventstream "throttle" [r]
+  (let [netref *netref*
+        q      (atom (make-queue max-queue-size))
+        new-r  (derive-new eventstream "throttle" [r]
                            :link-fn
                            (fn [{:keys [input-rvts] :as input}]
                              (if (>= (-> q deref :queue c/count) max-queue-size)
                                {:no-consume true}
                                (c/swap! q enqueue (fvalue input-rvts)))))
-        netref *netref*]
-    (sched/interval scheduler millis millis
-                    #(let [vs (:dequeued (c/swap! q dequeue-all))]
-                       (when-not (empty? vs) (rn/push! netref new-r (f vs)))))
+        task   (atom nil)
+        task-f (fn []
+                 (if (completed? new-r)
+                   (sched/cancel @task)
+                   (let [vs (:dequeued (c/swap! q dequeue-all))]
+                     (when-not (empty? vs)
+                       (rn/push! netref new-r (f vs))))))]
+    (reset! task (sched/interval scheduler millis millis task-f))
     new-r))
 
 
