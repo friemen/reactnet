@@ -138,16 +138,12 @@
       (assoc queue-state
         :queue (vec (rest uncompleted))
         :input r
-        :dont-complete nil
-        ;; dont block completion: auto completion will not complete output
-        ;; as long as there is a nor-completed r pointing to output.
         :add [(make-link "temp" [r] [output]
                          :complete-fn
                          (fn [_ r]
                            (c/merge (c/swap! q-atom switch-reactive q-atom)
                                     {:remove-by #(= [r] (link-inputs %))})))])
       (assoc queue-state
-        :dont-complete nil
         :add nil))))
 
 
@@ -532,11 +528,12 @@
                         old-t  @task
                         netref *netref*
                         s      (scheduler netref)
-                        new-t  (sched/once s millis #(rn/push! netref output v))]
+                        new-t  (sched/once s millis #(rn/enq netref {:rvt-map {output [v rn/now]}
+                                                                     :allow-complete #{output}}))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
                     (reset! task new-t)
-                  nil)))))
+                  {:dont-complete #{output}})))))
 
 
 (defn delay
@@ -552,8 +549,9 @@
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)]
-                    (sched/once s millis #(rn/push! netref output v))
-                    nil)))))
+                    (sched/once s millis #(rn/enq netref {:rvt-map {output [v rn/now]}
+                                                          :allow-complete #{output}}))
+                    {:dont-complete #{output}})))))
 
 
 (defn distinct
@@ -576,8 +574,7 @@
   (derive-new eventstream "drop" [r]
               :link-fn
               (fn [{:keys [input-rvts] :as input}]
-                (if (apply pred (values input-rvts))
-                  {:dont-complete nil}
+                (if-not (apply pred (values input-rvts))
                   (make-result-map input (fvalue input-rvts))))))
 
 
@@ -601,8 +598,7 @@
                 (fn [{:keys [input-rvts output-reactives]}]
                   (let [vs (:dequeued (c/swap! q enqueue (fvalue input-rvts)))]
                     (if (seq vs)
-                      {:output-rvts (single-value (first vs) (first output-reactives))}
-                      {:dont-complete nil}))))))
+                      {:output-rvts (single-value (first vs) (first output-reactives))}))))))
 
 (defn every
   "Returns an eventstream that emits false as soon as the first falsey
@@ -743,7 +739,7 @@
                 :executor executor
                 :link-fn
                 (make-link-fn (partial c/swap! accu f)
-                              (constantly {}))
+                              (constantly nil))
                 :complete-fn
                 (fn [l r]
                   {:output-rvts (single-value @accu (-> l link-outputs first))}))))
@@ -879,7 +875,6 @@
                 (if (apply pred (values input-rvts))
                   {:output-rvts (single-value (fvalue input-rvts) (first output-reactives))}
                   {:no-consume true
-                   :dont-complete nil
                    :remove-by #(= (link-outputs %) output-reactives)}))))
 
 
@@ -1092,7 +1087,7 @@
 
 (defn err-return
   "Attaches an exception-handler to the function calculating the items for r.
-  Upon exception r emits x.
+  Upon exception, r emits x.
   Returns r."
   [x r]
   (on-error *netref* r
@@ -1102,7 +1097,7 @@
 
 (defn err-switch
   "Attaches an exception-handler to the function calculating the items for r.
-  Upon exception r is permanently switched to follow reactive r-after-error.
+  Upon exception, r is permanently switched to follow reactive r-after-error.
   Returns r."
   [r-after-error r]
   {:pre [(reactive? r-after-error) (reactive? r)]}
@@ -1122,6 +1117,18 @@
   (on-error *netref* r
             (fn [input]
               (enq *netref* {:rvt-map {error-r [input (now)]}}))))
+
+
+(defn err-delegate
+  "Attaches an exception-handler to the function calculating the items for r.
+  Upon exception, f is invoked with a map containing the exception and
+  the input value. The result of f must be a network stimulus and is enqueued 
+  for propagation. 
+  Returns r."
+  [f r]
+  (on-error *netref* r
+            (fn [input]
+              (enq *netref* (f input)))))
 
 
 ;; ---------------------------------------------------------------------------

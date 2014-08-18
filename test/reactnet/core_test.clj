@@ -40,6 +40,16 @@
       (rn/push! rn/*netref* r v))))
 
 
+(def future-executor
+  (reify IExecutor
+    (execute [e netref f]
+      (future
+        (rn/with-netref netref
+          (Thread/sleep 100)
+          (try (f)
+               (catch Exception ex (.printStackTrace ex) ex)))))))
+
+
 ;; ---------------------------------------------------------------------------
 ;; Unit tests
 
@@ -277,22 +287,22 @@
 
 
 (deftest no-premature-completion-test
-  (let [future-link-fn (fn [{:keys [input-rvts output-reactives]}]
-                         (future (Thread/sleep 100)
-                                 (let [v (rn/fvalue input-rvts)]
-                                   (doseq [o output-reactives]
-                                     (push! o v))))
-                         nil)
-        e1 (eventstream "e1")
+  (let [e1 (eventstream "e1")
         e2 (eventstream "e2")
         e3 (eventstream "e3")
         e4 (eventstream "e4")
         r  (atom [])]
     (rn/with-netref
       (refs/agent-netref
-       (rn/make-network "test" [(rn/make-link "e1->e2" [e1] [e2] :link-fn future-link-fn :complete-on-remove [e2])
-                                (rn/make-link "e2->e3" [e2] [e3] :link-fn future-link-fn :complete-on-remove [e3])
-                                (rn/make-link "e3->e4" [e3] [e4] :link-fn future-link-fn :complete-on-remove [e4])
+       (rn/make-network "test" [(rn/make-link "e1->e2" [e1] [e2]
+                                              :complete-on-remove [e2]
+                                              :executor future-executor)
+                                (rn/make-link "e2->e3" [e2] [e3]
+                                              :complete-on-remove [e3]
+                                              :executor future-executor)
+                                (rn/make-link "e3->e4" [e3] [e4]
+                                              :complete-on-remove [e4]
+                                              :executor future-executor)
                                 (link (partial swap! r conj) [e4] [])]))
       (push! e1 42)
       (Thread/sleep 150)
@@ -341,19 +351,12 @@
 
 
 (deftest async-exec-test
-  (let [exec  (reify IExecutor
-                (execute [e netref f]
-                  (future
-                    (rn/with-netref netref
-                      (Thread/sleep 100)
-                      (try (f)
-                           (catch Exception ex (.printStackTrace ex) ex))))))
-        e     (eventstream "e")
+  (let [e     (eventstream "e")
         r     (atom [])]
     (rn/with-netref
       (refs/agent-netref
        (rn/make-network "test" [(assoc (link (partial swap! r conj) [e] [])
-                                  :executor exec)]))
+                                  :executor future-executor)]))
       (push! e 42)
       (Thread/sleep 50)
       (is (= [] @r))

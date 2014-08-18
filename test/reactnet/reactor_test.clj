@@ -301,7 +301,10 @@
         e        (r/eventstream)
         c        (->> e (r/filter odd?) (r/swap! r conj))]
     (apply push-and-wait! (interleave (repeat e) values))
-    (is (= [1 3 5 7 9] @r))))
+    (is (= [1 3 5 7 9] @r))
+    (complete! e)
+    (wait)
+    (is (rn/completed? c))))
 
 
 (deftest flatmap-test

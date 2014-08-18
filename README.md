@@ -384,6 +384,8 @@ start an update/propagation cycle of a network.
   :remove-by           A predicate matching links to remove from the network
   :add                 A seq of links to add to the network
   :rvt-map             A map {Reactive -> [v t]} of values to propagate
+  :allow-complete      A set of reactives for which to decrease the
+                       dont-complete counter
 ```
 
 
@@ -615,9 +617,10 @@ Therefore the network maintains a `:dont-complete` map that records
 the number of expected deliveries for each reactive. This counter is
 increased for a reactive whenever it is contained in a
 `:dont-complete` seq that the link-function returns as part of the
-result map. By default all output reactives of the link are listed,
-but link-functions can override this. The counter for a reactive is
-decreased whenever a value is delivered.
+result map. All output reactives of the link are listed, if an
+executor is used to execute the link function. The counter for a
+reactive is decreased when a stimulus contains it in the
+`:allow-complete` set of reactives.
 
 In addition the network maintains a `:pending-completions` seq that
 contains those reactives which are to be completed unless they appear

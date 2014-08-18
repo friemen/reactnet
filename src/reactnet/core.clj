@@ -88,9 +88,12 @@
 ;; A map containing data that is passed to enq/update-and-propagate! to
 ;; start an update/propagation cycle on a network.
 ;;   :results             A seq of Result maps
+;;   :exec                An fn [network & args -> network]
 ;;   :remove-by           A predicate matching links to remove from the network
 ;;   :add                 A seq of links to add to the network
 ;;   :rvt-map             A map {Reactive -> [v t]} of values to propagate
+;;   :allow-complete      A set of reactives for which to decrease the
+;;                        dont-complete counter
 
 ;; NetworkRef:
 ;; Serves as abstraction of how the network is stored and
@@ -622,8 +625,7 @@
                       :input-reactives inputs 
                       :input-rvts (for [r inputs] [r (rvt-map r)])
                       :output-reactives outputs
-                      :output-rvts nil
-                      :dont-complete (set outputs)}
+                      :output-rvts nil}
         netref       *netref*]
     (if executor
       (do (execute executor
@@ -631,11 +633,9 @@
                    (fn []
                      (let [result-map (safely-exec-link-fn link input)]
                        ;; send changes / values to netref
-                       (when (or (seq (:add result-map))
-                                 (:remove-by result-map)
-                                 (seq (:output-rvts result-map)))
-                         (enq netref {:results [result-map]})))))
-          input)
+                       (enq netref {:results [result-map]
+                                    :allow-complete (set outputs)}))))
+          (assoc input :dont-complete (set outputs)))
       (safely-exec-link-fn link input))))
 
 
@@ -773,9 +773,7 @@
                                            [{} []]
                                            rvts)]
       (if (seq rvt-map)
-        (recur (propagate! (allow-completion n (keys rvt-map))
-                           pending-links
-                           (deliver-values! rvt-map))
+        (recur (propagate! n pending-links (deliver-values! rvt-map))
                remaining-rvts)
         (dissoc n :unchanged?)))))
 
@@ -784,18 +782,16 @@
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [network {:keys [exec results add remove-by rvt-map]}]
+  [network {:keys [exec results add remove-by rvt-map allow-complete]}]
   (loop [n   (-> network
                  (apply-exec exec)
                  (update-from-results results)
                  (update-links (or remove-by #{}) add)
                  (rebuild-if-necessary)
-                 (allow-completion (->> rvt-map
-                                        (filter (fn [[r [v t]]]
-                                                  (not= ::completed v)))
-                                        (map first)))
+                 (allow-completion allow-complete)
                  (complete-pending)
-                 (propagate! add (deliver-values! rvt-map)))   
+                 (propagate! add (deliver-values! rvt-map))
+                 (propagate-downstream! nil (mapcat :output-rvts results)))   
          prs (pending-reactives n)]
     (let [next-n      (propagate! n prs)
           progress?   (not (:unchanged? next-n))
