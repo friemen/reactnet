@@ -134,15 +134,23 @@
   [{:keys [queue input output] :as queue-state} q-atom]
   (let [uncompleted (c/remove completed? queue)
         r           (first uncompleted)]
+    ;; there exists an uncompleted reactive,
+    ;; and either there is no current or it is completed
     (if (and r (or (nil? input) (completed? input)))
-      (assoc queue-state
-        :queue (vec (rest uncompleted))
-        :input r
-        :add [(make-link "temp" [r] [output]
-                         :complete-fn
-                         (fn [_ r]
-                           (c/merge (c/swap! q-atom switch-reactive q-atom)
-                                    {:remove-by #(= [r] (link-inputs %))})))])
+      ;; the output == input causes output to be completed!
+      (if (= r output)
+        (assoc queue-state
+          :queue []
+          :input nil
+          :output-rvts (single-value :reactnet.core/completed output))
+        (assoc queue-state
+          :queue (vec (rest uncompleted))
+          :input r
+          :add [(make-link "temp" [r] [output]
+                           :complete-fn
+                           (fn [_ r]
+                             (c/merge (c/swap! q-atom switch-reactive q-atom)
+                                      {:remove-by #(= [r] (link-inputs %))})))]))
       (assoc queue-state
         :add nil))))
 
@@ -493,7 +501,7 @@
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
   (let [new-r   (eventstream :label "concat")
-        state   (atom (make-reactive-queue new-r rs))
+        state   (atom (make-reactive-queue new-r (c/concat rs [new-r])))
         link    (-> (c/swap! state switch-reactive state) :add first)]
     (add-links! *netref* link)
     new-r))
@@ -528,7 +536,7 @@
                         old-t  @task
                         netref *netref*
                         s      (scheduler netref)
-                        new-t  (sched/once s millis #(rn/enq netref {:rvt-map {output [v rn/now]}
+                        new-t  (sched/once s millis #(rn/enq netref {:rvt-map {output [v (now)]}
                                                                      :allow-complete #{output}}))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
@@ -549,7 +557,7 @@
                 (fn [{:keys [input-rvts output-reactives] :as input}]
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)]
-                    (sched/once s millis #(rn/enq netref {:rvt-map {output [v rn/now]}
+                    (sched/once s millis #(rn/enq netref {:rvt-map {output [v (now)]}
                                                           :allow-complete #{output}}))
                     {:dont-complete #{output}})))))
 
@@ -637,8 +645,10 @@
         new-r    (eventstream :label "flatmap")
         state    (atom (make-reactive-queue new-r)) ]
     (add-links! *netref* (make-link "flatmap" [r] [new-r]
-                                    :complete-on-remove [new-r]
                                     :executor executor
+                                    :complete-fn
+                                    (fn [l r]
+                                      (c/swap! state enqueue-reactive state new-r))
                                     :link-fn
                                     (fn [{:keys [input-rvts] :as input}]
                                       (let [r (f (fvalue input-rvts))]
@@ -721,8 +731,14 @@
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
   (let [new-r   (eventstream :label "merge")
-        links   (->> rs (c/map #(make-link "merge" [%] [new-r])))]
-    (apply (partial add-links! *netref*) links)
+        inputs  (atom (set rs))
+        links   (->> rs (c/map #(make-link "merge" [%] [new-r]
+                                           :complete-fn (fn [l r]
+                                                          (when-not (seq (c/swap! inputs disj r))
+                                                            (complete! new-r))))))]
+    (if (seq links)
+      (apply (partial add-links! *netref*) links)
+      (complete! new-r))
     new-r))
 
 
@@ -742,7 +758,8 @@
                               (constantly nil))
                 :complete-fn
                 (fn [l r]
-                  {:output-rvts (single-value @accu (-> l link-outputs first))}))))
+                  {:output-rvts (single-value @accu
+                                              (-> l link-outputs first))}))))
 
 
 (defn remove
@@ -883,7 +900,20 @@
   [n r]
   {:pre [(pos? n) (reactive? r)]
    :post [(reactive? %)]}
-  (take-while (countdown n) r))
+  (let [counter  (atom n)
+        new-r    (derive-new eventstream "take" [r]
+                             :link-fn
+                             (fn [{:keys [input-rvts output-reactives] :as input}]
+                               (if (> (c/swap! counter dec) 0)
+                                 {:output-rvts (single-value (fvalue input-rvts)
+                                                             (first output-reactives))}
+                                 {:output-rvts (enqueue-values [(fvalue input-rvts)
+                                                                :reactnet.core/completed]
+                                                               (first output-reactives))
+                                  :remove-by #(= (link-outputs %) output-reactives)})))]
+    (when (= 0 n)
+      (complete! new-r))
+    new-r))
 
 
 (defn take-last

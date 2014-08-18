@@ -34,7 +34,7 @@
 (defn agent-netref
   "Wraps and returns the network in an agent based NetworkRef."
   [network]
-  (AgentNetref. max-queue-size (agent network) (sched/scheduler 5)))
+  (AgentNetref. max-queue-size (agent network) (sched/scheduler 15)))
 
 
 (defrecord AtomNetref [n-atom sched]

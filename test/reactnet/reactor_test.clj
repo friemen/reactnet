@@ -372,15 +372,24 @@
 
 
 (deftest merge-test
-  (let [r        (atom [])
-        streams  (for [i (range 5)]
-                   (r/eventstream :label (str "e" i)))
-        expected (repeatedly 400 #(rand-int 100))
-        c        (->> streams (apply r/merge) (r/swap! r conj))]
-    (doseq [x expected]
-      (push! (rand-nth streams) x))
-    (wait 1500)
-    (is (= expected @r))))
+  (testing "Merge preserves order"
+    (let [r        (atom [])
+          streams  (for [i (range 5)]
+                     (r/eventstream :label (str "e" i)))
+          expected (repeatedly 400 #(rand-int 100))
+          c        (->> streams (apply r/merge) (r/swap! r conj))]
+      (doseq [x expected]
+        (push! (rand-nth streams) x))
+      (wait 1500)
+      (is (= expected @r))))
+  (testing "Merge completes when last input completes"
+    (let [e1 (r/eventstream :label "e1")
+          e2 (r/eventstream :label "e2")
+          c  (r/merge e1 e2)]
+      (complete! e1)
+      (complete! e2)
+      (wait)
+      (is (rn/completed? c)))))
 
 
 (deftest reduce-test
