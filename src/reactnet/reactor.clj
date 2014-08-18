@@ -138,13 +138,17 @@
       (assoc queue-state
         :queue (vec (rest uncompleted))
         :input r
-        :dont-complete [output]
+        :dont-complete nil
+        ;; dont block completion: auto completion will not complete output
+        ;; as long as there is a nor-completed r pointing to output.
         :add [(make-link "temp" [r] [output]
                          :complete-fn
                          (fn [_ r]
                            (c/merge (c/swap! q-atom switch-reactive q-atom)
                                     {:remove-by #(= [r] (link-inputs %))})))])
-      (dissoc queue-state :dont-complete :add))))
+      (assoc queue-state
+        :dont-complete nil
+        :add nil))))
 
 
 (defn- enqueue-reactive
@@ -674,7 +678,7 @@
     (derive-new eventstream "map" rs
                 :executor executor
                 :link-fn
-                (make-link-fn f make-result-map))))
+                (make-link-fn f))))
 
 
 (defn mapcat
@@ -738,7 +742,7 @@
     (derive-new eventstream "reduce" [r]
                 :executor executor
                 :link-fn
-                (make-link-fn (fn [v] (c/swap! accu f v))
+                (make-link-fn (partial c/swap! accu f)
                               (constantly {}))
                 :complete-fn
                 (fn [l r]

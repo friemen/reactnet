@@ -34,9 +34,6 @@
   (deref [this]
     (first @a)))
 
-(prefer-method print-method java.util.Map clojure.lang.IDeref)
-(prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
-
 
 ;; ---------------------------------------------------------------------------
 ;; A buffered Eventstream implementation of the IReactive protocol
@@ -94,8 +91,10 @@
     (-> seq-val-atom deref :seq nil?))
   (consume! [this]
     (:last-occ (swap! seq-val-atom (fn [{:keys [seq]}]
-                                     {:seq (next seq)
-                                      :last-occ [(first seq) (rn/now)]}))))
+                                     (if-let [v (first seq)]
+                                       {:seq (next seq)
+                                        :last-occ [v (rn/now)]}
+                                       (throw (IllegalStateException. (str "Seqstream is empty"))))))))
   (deliver! [r value-timestamp-pair]
     (throw (UnsupportedOperationException. "Unable to deliver a value to a seq")))
   clojure.lang.IDeref
@@ -156,3 +155,8 @@
 (defn fnbehavior
   [f]
   (Fnbehavior. f))
+
+
+(prefer-method print-method java.util.Map clojure.lang.IDeref)
+(prefer-method print-method clojure.lang.IRecord clojure.lang.IDeref)
+(prefer-method print-method clojure.lang.IPersistentMap clojure.lang.IDeref)

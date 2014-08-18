@@ -310,8 +310,11 @@
         f       (fn [x] (->> x r/just (r/map (partial * 2)) (r/map (partial + 1))))
         e       (r/eventstream)
         c       (->> e (r/flatmap f) (r/scan + 0) (r/swap! r conj))]
-    (apply push-and-wait! (interleave (repeat e) values))
-    (is (= [1 4 9 16 25] @r))))
+    (apply push-and-wait! (interleave (repeat e) values))    
+    (is (= [1 4 9 16 25] @r))
+    (complete! e)
+    (wait)
+    (is (rn/completed? c))))
 
 
 (deftest into-test
@@ -344,7 +347,17 @@
           b   (r/behavior 0 :label "b")
           c   (->> (r/map + e b) (r/swap! r conj))]
       (push-and-wait! b 1 b 2 e 1 e 2)
-      (is (= [3 4] @r)))))
+      (is (= [3 4] @r))))
+  (testing "One infinite eventstream, one finite eventstream"
+    (let [r   (atom [])
+          e1  (r/eventstream :label "e1")
+          e2  (r/seqstream (repeat 42))
+          c   (->> (r/map + e1 e2) (r/swap! r conj))]
+      (push-and-wait! e1 1 e1 2 e1 3)
+      (is (= [43 44 45] @r))
+      (complete! e1)
+      (wait)
+      (is (rn/completed? c)))))
 
 
 (deftest mapcat-test
