@@ -324,19 +324,35 @@
 ;; ---------------------------------------------------------------------------
 ;; Profiling
 
-(defn ^:no-doc prof-update
+(defn ^:no-doc prof-update-time
   [a start stop]
-  (swap! a (fn [{:keys [n duration] :as m}]
-             (assoc m
-               :n (inc (or n 0))
-               :duration (+ (or duration 0) (- stop start))))))
+  (swap! a (fn [{:keys [n nanos] :as m}]
+             (let [nanos (+ (or nanos 0) (- stop start))
+                   millis (int (/ nanos 1e6))]
+               (assoc m
+                 :n (inc (or n 0))
+                 :millis millis
+                 :nanos nanos)))))
+
+
+(defn ^:no-doc prof-update-value
+  [a v]
+  (swap! a (fn [{:keys [n sum max min avg] :as m}]
+             (let [new-n   (inc (or n 0))
+                   new-sum (+ (or sum 0) v)]
+               (assoc m
+                 :n new-n
+                 :sum new-sum
+                 :max (clojure.core/max v (or max Long/MIN_VALUE))
+                 :min (clojure.core/min v (or min Long/MAX_VALUE))
+                 :avg (float (/ new-sum new-n)))))))
+
 
 ;; TODO attach them to the netref
-(def monitors {'update-links (atom nil)
-               'update-from-results (atom nil)
+(def monitors {'update-from-results (atom nil)
                'rebuild (atom nil)
-               'update-and-propagate! (atom nil)
                'propagate! (atom nil)
+               'update-and-propagate! (atom nil)
                'eval-link! (atom nil)
                'eval-complete-fns! (atom nil)
                'test (atom nil)})
@@ -347,12 +363,18 @@
 (defmacro ^:no-doc prof-time
   [key & exprs]
   `(if profile?
-     (let [start# (now)
+     (let [start# (System/nanoTime)
            result# (do ~@exprs)
-           stop# (now)]
-       (prof-update (get monitors ~key) start# stop#)
+           stop# (System/nanoTime)]
+       (prof-update-time (get monitors ~key) start# stop#)
        result#)
      (do ~@exprs)))
+
+
+(defmacro ^:no-doc prof-value
+  [key v]
+  `(when profile?
+     (prof-update-value (get monitors ~key) ~v)))
 
 
 (defn ^:no-doc print-monitors
@@ -601,19 +623,17 @@
   new-links to the networks links. Returns an updated network, and
   flags with :rebuild? if a rebuild is necessary."
   [{:keys [links] :as n} remove-by-pred new-links]
-  (prof-time
-   'update-links
-   (let [[links-to-remove remaining-links] (dissect remove-by-pred links)]
-     (when (seq links-to-remove)
-       (dump-links "REMOVE" links-to-remove))
-     (when (seq new-links)
-       (dump-links "ADD" new-links))
-     (-> n
-         (update-in [:pending-completions] concat (->> links-to-remove
-                                                       (mapcat :complete-on-remove)))
-         (assoc
-             :links (concat remaining-links new-links)
-             :rebuild? (or (seq links-to-remove) (seq new-links)))))))
+  (let [[links-to-remove remaining-links] (dissect remove-by-pred links)]
+    (when (seq links-to-remove)
+      (dump-links "REMOVE" links-to-remove))
+    (when (seq new-links)
+      (dump-links "ADD" new-links))
+    (-> n
+        (update-in [:pending-completions] concat (->> links-to-remove
+                                                      (mapcat :complete-on-remove)))
+        (assoc
+            :links (concat remaining-links new-links)
+            :rebuild? (or (seq links-to-remove) (seq new-links))))))
 
 
 (defn- update-from-results
@@ -628,25 +648,15 @@
                               (reduce (fn [m r]
                                         (assoc m r (or (some-> r m inc) 1)))
                                       dont-complete))
-         _ (comment
-             remove-preds    (->> results
-                                  (map :remove-by)
-                                  (remove nil?)
-                                  (cons dead?))
-             links-to-remove (->> n :links
-                                  (filter (partial any-pred? remove-preds))
-                                  set))
-         _ (comment)
          links-to-remove (->> results
                               (map :remove-by)
                               (remove nil?)
                               (cons dead?)
                               (reduce (fn [ls pred]
-                                        (->> n :links
+                                        (->> links
                                              (filter pred)
                                              (into ls)))
                                       #{}))
-         
          links-to-add    (->> results (mapcat :add) set)]
      (-> n
          (assoc :dont-complete dont-complete)
@@ -774,70 +784,67 @@
      (propagate! network [] pending-reactives))
   ([{:keys [rid-map links-map level-map pending-completions dont-complete] :as network}
     pending-links pending-reactives]
-     (prof-time
-      'propagate!
-      (do
-        (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
-        (when (seq pending-completions)
-          (dump "  PENDING COMPLETIONS:" (->> pending-completions (map :label) (s/join ", "))))
-        (when (seq dont-complete)
-          (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
-        (when (seq pending-reactives)
-          (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
-      (let [links           (->> pending-reactives
-                                 (map (partial get rid-map))
-                                 (mapcat links-map)
-                                 (concat pending-links)
-                                 (sort-by :level (comparator <))
-                                 distinct)
-            _               (dump-links "CANDIDATES" links)
-            available-links (->> links
-                                 (filter ready?)
-                                 doall)
-            level           (or (-> available-links first :level) 0)
-            same-level?     (fn [l] (= (:level l) level))
-            [current-links
-             pending-links] (dissect same-level? available-links)
-            
-            rvt-map         (->> current-links
-                                 (mapcat link-inputs)
-                                 distinct
-                                 next-values)
-            _               (dump-values "INPUTS" rvt-map)
-            link-results    (->> current-links
-                                 (map (partial eval-link! rvt-map)))
-            consumed-rvts   (->> link-results
-                                 (remove :no-consume)
-                                 (mapcat :input-reactives)
-                                 set (map consume!) doall)
-            compl-results   (eval-complete-fns! network)
-            results         (concat link-results compl-results)
-            unchanged?      (->> results (remove :no-consume) empty?)
-            
-            ;; apply network changes returned by link and complete functions
-            network         (-> network
-                                (update-from-results results)
-                                complete-pending
-                                rebuild-if-necessary) 
-            
-            all-rvts        (->> results (mapcat :output-rvts))
-            _               (dump-values "OUTPUTS" all-rvts)
-            upstream?       (fn [[r _]]
-                              (let [r-level (level-map (get rid-map r))]
-                                (or (nil? r-level) (< r-level level))))
-            downstream-rvts (->> all-rvts
-                                 (remove upstream?)
-                                 (sort-by #(level-map (get rid-map (first %))) (comparator <)))
-            upstream-rvts   (->> all-rvts (filter upstream?))]
-        ;; push value into next cycle if reactive level is either
-        ;; unknown or is lower than current level
-        (doseq [[r [v t]] upstream-rvts]
-          (enq *netref* {:rvt-map {r [v t]}}))
-        (if unchanged?
-          (assoc network :unchanged? true)
-          (propagate-downstream! network
-                                 pending-links
-                                 downstream-rvts))))))
+     (do
+       (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
+       (when (seq pending-completions)
+         (dump "  PENDING COMPLETIONS:" (->> pending-completions (map :label) (s/join ", "))))
+       (when (seq dont-complete)
+         (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
+       (when (seq pending-reactives)
+         (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
+     (let [links           (prof-time 'propagate! (->> pending-reactives
+                                                      (map (partial get rid-map))
+                                                      (mapcat links-map)
+                                                      (concat pending-links)
+                                                      (sort-by :level (comparator <))
+                                                      distinct))
+           _               (dump-links "CANDIDATES" links)
+           available-links (prof-time 'propagate! (->> links
+                                                      (filter ready?)
+                                                      doall))
+           level           (prof-time 'propagate! (or (-> available-links first :level) 0))
+           same-level?     (prof-time 'propagate! (fn [l] (= (:level l) level)))
+           [current-links
+            pending-links] (prof-time 'propagate! (dissect same-level? available-links))
+           rvt-map         (prof-time 'propagate! (->> current-links
+                                                      (mapcat link-inputs)
+                                                      distinct
+                                                      next-values))
+           _               (dump-values "INPUTS" rvt-map)
+           link-results    (prof-time 'propagate! (->> current-links
+                                                       (map (partial eval-link! rvt-map))))
+           consumed-rvts   (prof-time 'propagate! (->> link-results
+                                                       (remove :no-consume)
+                                                       (mapcat :input-reactives)
+                                                       set (map consume!) doall))
+           compl-results   (prof-time 'propagate! (eval-complete-fns! network))
+           results         (prof-time 'propagate! (concat link-results compl-results))
+           unchanged?      (prof-time 'propagate! (->> results (remove :no-consume) empty?))
+           
+           ;; apply network changes returned by link and complete functions
+           network         (prof-time 'propagate! (-> network
+                                                      (update-from-results results)
+                                                      complete-pending
+                                                      rebuild-if-necessary))
+           all-rvts        (prof-time 'propagate! (->> results (mapcat :output-rvts)))
+           _               (dump-values "OUTPUTS" all-rvts)
+           upstream?       (prof-time 'propagate! (fn [[r _]]
+                                                    (let [r-level (level-map (get rid-map r))]
+                                                      (or (nil? r-level) (< r-level level)))))
+           downstream-rvts (prof-time 'propagate! (->> all-rvts
+                                                       (remove upstream?)
+                                                       (sort-by #(level-map (get rid-map (first %))) (comparator <))))
+           upstream-rvts   (prof-time 'propagate! (->> all-rvts (filter upstream?)))]
+       
+       ;; push value into next cycle if reactive level is either
+       ;; unknown or is lower than current level
+       (prof-time 'propagate! (doseq [[r [v t]] upstream-rvts]
+                                (enq *netref* {:rvt-map {r [v t]}})))
+       (if unchanged?
+         (assoc network :unchanged? true)
+         (propagate-downstream! network
+                                pending-links
+                                downstream-rvts)))))
 
 
 (defn- propagate-downstream!
