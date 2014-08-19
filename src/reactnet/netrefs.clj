@@ -29,7 +29,7 @@
     @n-agent))
 
 
-(def max-queue-size 1000)
+(def max-queue-size 5000)
 
 (defn agent-netref
   "Wraps and returns the network in an agent based NetworkRef."
