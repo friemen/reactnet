@@ -4,6 +4,18 @@
   (:import [java.lang.ref WeakReference]
            [java.util WeakHashMap]))
 
+;; TODO
+;; Fix on-error
+;; add-link, use reduction to update level-map
+;; consume! shall return true/false to signal completion
+;; completion might happen through direct delivery (behavior!)
+;;  --> an occasional dead? check is therefore still useful / required
+;; improve monitoring
+;; - dynamic monitor creation
+;; - use own ns
+;; - use a :type key to distingusih between value and time monitor
+;; - add avg, min, max to time monitor
+;; - put a monitors map into a netref
 
 ;; ---------------------------------------------------------------------------
 ;; Concepts
@@ -365,6 +377,7 @@
                'propagatef (atom nil)
                'propagateg (atom nil)
                'propagateh (atom nil)
+               'pending-reactives (atom nil)
                'update-and-propagate! (atom nil)
                'eval-link! (atom nil)
                'eval-complete-fns! (atom nil)
@@ -488,8 +501,14 @@
 
 (defn ^:no-doc pending-reactives
   "Returns a seq of pending reactives."
-  [{:keys [rid-map]}]
-  (->> rid-map keys (remove nil?) (filter pending?)))
+  [{:keys [rid-map links-map]}]
+  (prof-time
+   'pending-reactives
+   (->> rid-map
+        keys
+        (remove nil?)
+        (filter pending?)
+        doall)))
 
 
 
@@ -592,9 +611,6 @@
               (let [input-rids       (->> links-to-remove
                                           (mapcat link-inputs)
                                           (map (partial get rid-map)))
-                    output-rids      (->> links-to-remove
-                                          (mapcat link-inputs)
-                                          (map (partial get rid-map)))
                     links-map        (reduce (fn [lm i]
                                                (let [lset (apply disj (get lm i) links-to-remove)]
                                                  (if (empty? lset)
@@ -661,7 +677,7 @@
 (defn- update-from-results
   "Takes a network and a seq of result maps and adds / removes links.
   Returns an updated network."
-  [{:keys [links dont-complete] :as n} results]
+  [{:keys [links rid-map links-map dont-complete] :as n} completed-rs results]
   (prof-time
    'update-from-results
    (let [dont-complete   (->> results
@@ -669,19 +685,32 @@
                               (reduce (fn [m r]
                                         (assoc m r (or (some-> r m inc) 1)))
                                       dont-complete))
-         links-to-remove (->> results
-                              (map :remove-by)
-                              (remove nil?)
-                              (cons dead?)
-                              (reduce (fn [ls pred]
-                                        (->> links
-                                             (filter pred)
-                                             (into ls)))
-                                      #{}))
+         _ (comment
+           links-to-remove (->> completed-rs
+                                (map (partial get rid-map))
+                                (mapcat links-map)
+                                set)
+           remove-by-preds  (->> results
+                                 (map :remove-by)
+                                 (remove nil?))
+           remove-by        (if (empty? links-to-remove)
+                              remove-by-preds
+                              (conj remove-by-preds links-to-remove)))
+         #_ (println (count completed-rs))
+         links-to-remove  (->> results
+                                 (map :remove-by)
+                                 (remove nil?)
+                                 (cons dead?)
+                                 (reduce (fn [ls pred]
+                                           (->> links
+                                                (filter pred)
+                                                (into ls)))
+                                         #{}))
          links-to-add    (->> results (mapcat :add) set)]
      (-> n
          (assoc :dont-complete dont-complete)
-         (update-links links-to-remove links-to-add)))))
+         (update-links links-to-remove links-to-add)
+         #_ (update-links (partial any-pred? remove-by) links-to-add)))))
 
 
 (defn- replace-link-error-fn
@@ -725,14 +754,14 @@
   [rvt-map {:keys [link-fn level executor] :as link}]
   (prof-time
    'eval-link!
-   (let [inputs       (link-inputs link)
-         outputs      (->> link link-outputs (remove nil?))
-         input        {:link link
-                       :input-reactives inputs 
-                       :input-rvts (for [r inputs] [r (rvt-map r)])
-                       :output-reactives outputs
-                       :output-rvts nil}
-         netref       *netref*]
+   (let [inputs  (link-inputs link)
+         outputs (->> link link-outputs (remove nil?))
+         input   {:link link
+                  :input-reactives inputs 
+                  :input-rvts (for [r inputs] [r (rvt-map r)])
+                  :output-reactives outputs
+                  :output-rvts nil}
+         netref  *netref*]
      (if executor
        (do (execute executor
                     netref
@@ -773,13 +802,16 @@
 
 
 (defn- consume-values!
-  "Consumes all values from reactives. 
-  Returns a map {Reactive -> [value timestamp]}."
-  [reactives]
-  (reduce (fn [rvt-map r]
-            (assoc rvt-map r (consume! r)))
-          {}
-          reactives))
+  "Consumes all values from reactives contained in evaluation results. 
+  Returns a seq of completed reactives."
+  [results]
+  (let [reactives (->> results
+                       (remove :no-consume)
+                       (mapcat :input-reactives)
+                       set)]
+    (doseq [r reactives]
+      (consume! r))
+    (filter completed? reactives)))
 
 
 (defn- deliver-values!
@@ -793,6 +825,34 @@
            (catch IllegalStateException ex
              (enq *netref* {:rvt-map {r vt}})))))
   (->> rvt-map (map first) (filter pending?)))
+
+
+
+(defn- eval-pending-reactives
+  [{:keys [rid-map links-map level-map] :as n} pending-links pending-reactives]
+  (let [links           (->> pending-reactives
+                             (map (partial get rid-map))
+                             (mapcat links-map)
+                             (concat pending-links)
+                             (sort-by level-map (comparator <))
+                             distinct)
+        _               (dump-links "CANDIDATES" links)
+        available-links (->> links
+                             (filter ready?)
+                             doall)
+        level           (or (-> available-links first level-map) 0)
+        same-level?     (fn [l] (= (level-map l) level))
+        [current-links
+         pending-links] (dissect same-level? available-links)
+        rvt-map         (->> current-links
+                             (mapcat link-inputs)
+                             distinct
+                             next-values)
+        _               (dump-values "INPUTS" rvt-map)
+        link-results    (->> current-links
+                             (map (partial eval-link! rvt-map)))]
+    [level pending-links link-results]))
+
 
 
 (declare propagate-downstream!)
@@ -814,53 +874,40 @@
          (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
        (when (seq pending-reactives)
          (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
-     (let [links           (prof-time 'propagate1 (->> pending-reactives
-                                                      (map (partial get rid-map))
-                                                      (mapcat links-map)
-                                                      (concat pending-links)
-                                                      (sort-by level-map (comparator <))
-                                                      distinct))
-           _               (dump-links "CANDIDATES" links)
-           available-links (prof-time 'propagate2 (->> links
-                                                      (filter ready?)
-                                                      doall))
-           level           (prof-time 'propagate3 (or (-> available-links first level-map) 0))
-           same-level?     (prof-time 'propagate4 (fn [l] (= (level-map l) level)))
-           [current-links
-            pending-links] (prof-time 'propagate5 (dissect same-level? available-links))
-           rvt-map         (prof-time 'propagate6 (->> current-links
-                                                      (mapcat link-inputs)
-                                                      distinct
-                                                      next-values))
-           _               (dump-values "INPUTS" rvt-map)
-           link-results    (prof-time 'propagate7 (->> current-links
-                                                       (map (partial eval-link! rvt-map))))
-           consumed-rvts   (prof-time 'propagate8 (->> link-results
-                                                       (remove :no-consume)
-                                                       (mapcat :input-reactives)
-                                                       set (map consume!) doall))
-           compl-results   (prof-time 'propagate9 (eval-complete-fns! network))
-           results         (prof-time 'propagatea (concat link-results compl-results))
-           unchanged?      (prof-time 'propagateb (->> results (remove :no-consume) empty?))
+     (let [#_ network         #_ (if (empty? pending-reactives)
+                             (remove-links network dead?)
+                             network)
+           [level
+            pending-links
+            link-results]  (eval-pending-reactives network pending-links pending-reactives)
+
+           
+           completed-rs    (concat (consume-values! link-results)
+                                   (filter completed? pending-reactives))
+           compl-results   (eval-complete-fns! network)
+           results         (concat link-results compl-results)
+
+           
+           unchanged?      (->> results (remove :no-consume) empty?)
            
            ;; apply network changes returned by link and complete functions
-           network         (prof-time 'propagatec (-> network
-                                                      (update-from-results results)
-                                                      complete-pending))
-           all-rvts        (prof-time 'propagated (->> results (mapcat :output-rvts)))
+           network         (-> network
+                               (update-from-results completed-rs results)
+                               complete-pending)
+           all-rvts        (->> results (mapcat :output-rvts))
            _               (dump-values "OUTPUTS" all-rvts)
-           upstream?       (prof-time 'propagatee (fn [[r _]]
-                                                    (let [r-level (level-map (get rid-map r))]
-                                                      (or (nil? r-level) (< r-level level)))))
-           downstream-rvts (prof-time 'propagatef (->> all-rvts
-                                                       (remove upstream?)
-                                                       (sort-by #(level-map (get rid-map (first %))) (comparator <))))
-           upstream-rvts   (prof-time 'propagateg (->> all-rvts (filter upstream?)))]
+           upstream?       (fn [[r _]]
+                             (let [r-level (level-map (get rid-map r))]
+                               (or (nil? r-level) (< r-level level))))
+           downstream-rvts (->> all-rvts
+                                (remove upstream?)
+                                (sort-by #(level-map (get rid-map (first %))) (comparator <)))
+           upstream-rvts   (->> all-rvts (filter upstream?))]
        
        ;; push value into next cycle if reactive level is either
        ;; unknown or is lower than current level
-       (prof-time 'propagateh (doseq [[r [v t]] upstream-rvts]
-                                (enq *netref* {:rvt-map {r [v t]}})))
+       (doseq [[r [v t]] upstream-rvts]
+         (enq *netref* {:rvt-map {r [v t]}}))
        (if unchanged?
          (assoc network :unchanged? true)
          (propagate-downstream! network
@@ -894,7 +941,7 @@
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  (update-from-results results)
+                  (update-from-results nil results)
                   (update-links (or remove-by #{}) add)
                   (allow-completion allow-complete)
                   (complete-pending)

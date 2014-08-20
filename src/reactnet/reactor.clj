@@ -65,7 +65,7 @@
                 (atom {:queue (PersistentQueue/EMPTY)
                        :last-occ nil
                        :completed false})
-                1000))
+                5000))
 
 
 (defn eventstream?
