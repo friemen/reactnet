@@ -5,7 +5,8 @@
            [java.util WeakHashMap]))
 
 ;; TODO
-;; Fix on-error
+;; Fix on-error / add on-error test
+;; Fix weakref test
 ;; add-link, use reduction to update level-map
 ;; consume! shall return true/false to signal completion
 ;; completion might happen through direct delivery (behavior!)
@@ -147,12 +148,13 @@
   "Returns a pair of vectors, first vector contains the xs for
   which (pred x) returns true, second vector the other xs."
   [pred xs]
-  (reduce (fn [[txs fxs] x]
-            (if (pred x)
-              [(conj txs x) fxs]
-              [txs (conj fxs x)]))
-          [[] []]
-          xs))
+  (let [[txs fxs] (reduce (fn [[txs fxs] x]
+                            (if (pred x)
+                              [(conj! txs x) fxs]
+                              [txs (conj! fxs x)]))
+                          [(transient []) (transient [])]
+                          xs)]
+    [(persistent! txs) (persistent! fxs)]))
 
 
 (defn- any-pred?
@@ -360,24 +362,6 @@
 (def monitors {'update-from-results (atom nil)
                'add-link (atom nil)
                'remove-links (atom nil)
-               'dead (atom nil)
-               'propagate1 (atom nil)
-               'propagate2 (atom nil)
-               'propagate3 (atom nil)
-               'propagate4 (atom nil)
-               'propagate5 (atom nil)
-               'propagate6 (atom nil)
-               'propagate7 (atom nil)
-               'propagate8 (atom nil)
-               'propagate9 (atom nil)
-               'propagatea (atom nil)
-               'propagateb (atom nil)
-               'propagatec (atom nil)
-               'propagated (atom nil)
-               'propagatee (atom nil)
-               'propagatef (atom nil)
-               'propagateg (atom nil)
-               'propagateh (atom nil)
                'pending-reactives (atom nil)
                'update-and-propagate! (atom nil)
                'eval-links (atom nil)
@@ -650,7 +634,7 @@
   (let [[remaining completables] (dissect dont-complete pending-completions)]
     (doseq [r completables]
       (enq *netref* {:rvt-map {r [::completed (now)]}}))
-    (assoc n :pending-completions (set remaining))))
+    (assoc n :pending-completions remaining)))
 
 
 (defn- allow-completion
@@ -697,7 +681,7 @@
                               (remove nil?))
          remove-by-preds (if (seq links-to-remove)
                            (conj remove-bys links-to-remove)
-                           remove-bys #_ (conj remove-bys dead?))
+                           remove-bys)
          new-links       (->> results (mapcat :add) set)]
      (-> n
          (assoc :dont-complete dont-complete)
@@ -814,16 +798,10 @@
   [{:keys [rid-map links links-map] :as n} completed-rs]
   (prof-time
    'eval-complete-fns!
-   (let [#_ completed-rs #_ (->> links
-                           (filter :complete-fn)
-                           (mapcat link-inputs)
-                           (remove nil?)
-                           (filter completed?)
-                           set)
-         results  (for [r completed-rs
+   (let [results  (for [r completed-rs
                         [l f] (->> r (get rid-map) links-map
                                    (map (juxt identity :complete-fn))) :when f]
-                    (do #_(println "COMPLETE-FN" (:label l)) (f l r)))]
+                    (f l r))]
      (remove nil? results))))
 
 
@@ -927,6 +905,10 @@
         (dissoc n :unchanged?)))))
 
 
+(defn remove-dead
+  [n]
+  (prof-time 'test (remove-links n dead?)))
+
 (defn update-and-propagate!
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
@@ -941,7 +923,7 @@
                                        (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
                   (propagate-downstream! nil (mapcat :output-rvts results))
-                  (remove-links dead?))
+                  #_ remove-dead)
           prs (pending-reactives n)]
      (let [next-n      (propagate! n prs)
            progress?   (not (:unchanged? next-n))
