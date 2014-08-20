@@ -7,10 +7,6 @@
 ;; TODO
 ;; Fix on-error / add on-error test
 ;; Fix weakref test
-;; add-link, use reduction to update level-map
-;; consume! shall return true/false to signal completion
-;; completion might happen through direct delivery (behavior!)
-;;  --> an occasional dead? check is therefore still useful / required
 ;; improve monitoring
 ;; - dynamic monitor creation
 ;; - use own ns
@@ -611,8 +607,7 @@
                           :pending-removes (+ (count links-to-remove) (or pending-removes 0))
                           :links-map links-map)))
                :pending-completions (concat pending-completions
-                                            (->> links-to-remove
-                                                 (mapcat :complete-on-remove)))))
+                                            (mapcat :complete-on-remove links-to-remove))))
          n))
      n)))
 
@@ -810,7 +805,7 @@
 
 (defn- deliver-values!
   "Updates all reactives from the reactive-values map and returns a
-  seq of pending reactives."
+  pair of [pending-reactives completed-reactives]."
   [rvt-map]
   (doseq [[r vt] rvt-map]
     (if (completed? r)
@@ -868,15 +863,13 @@
                ;; apply network changes returned by link and complete functions
 
                network         (update-from-results network completed-rs results)
-               all-rvts        (->> results (mapcat :output-rvts))
+               all-rvts        (mapcat :output-rvts results)
                _               (dump-values "OUTPUTS" all-rvts)
                upstream?       (fn [[r _]]
                                  (let [r-level (level-map (get rid-map r))]
                                    (or (nil? r-level) (< r-level level))))
-               downstream-rvts (->> all-rvts
-                                    (remove upstream?)
-                                    (sort-by #(level-map (get rid-map (first %))) (comparator <)))
-               upstream-rvts   (->> all-rvts (filter upstream?))]
+               [upstream-rvts
+                downstream-rvts] (dissect upstream? all-rvts)]
            ;; push value into next cycle if reactive level is either
            ;; unknown or is lower than current level
            (doseq [[r [v t]] upstream-rvts]
@@ -908,10 +901,6 @@
         (dissoc n :unchanged?)))))
 
 
-(defn remove-dead
-  [n]
-  (prof-time 'test (remove-links n dead?)))
-
 (defn update-and-propagate!
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
@@ -925,8 +914,7 @@
                   (update-from-results (->> rid-map keys (filter completed?))
                                        (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
-                  (propagate-downstream! nil (mapcat :output-rvts results))
-                  #_ remove-dead)
+                  (propagate-downstream! nil (mapcat :output-rvts results)))
           prs (pending-reactives n)]
      (let [next-n      (propagate! n prs)
            progress?   (not (:unchanged? next-n))
