@@ -385,7 +385,7 @@
                'test (atom nil)})
 
 
-(def ^:no-doc profile? false)
+(def ^:no-doc profile? true)
 
 (defmacro ^:no-doc prof-time
   [key & exprs]
@@ -494,11 +494,11 @@
   [link]
   (let [inputs (link-inputs link)
         outputs (link-outputs link)]
-    (or (some completed? inputs)
-        (and (seq outputs)
+    (or (and (seq outputs)
              (->> outputs
                   (remove nil?)
-                  (every? completed?))))))
+                  (every? completed?)))
+        (some completed? inputs))))
 
 
 (defn ^:no-doc pending-reactives
@@ -697,11 +697,12 @@
                               (remove nil?))
          remove-by-preds (if (seq links-to-remove)
                            (conj remove-bys links-to-remove)
-                           (conj remove-bys dead?))
-         links-to-add    (->> results (mapcat :add) set)]
+                           remove-bys #_ (conj remove-bys dead?))
+         new-links       (->> results (mapcat :add) set)]
      (-> n
          (assoc :dont-complete dont-complete)
-         (update-links (partial any-pred? remove-by-preds) links-to-add)))))
+         (update-links (partial any-pred? remove-by-preds) new-links)
+         complete-pending))))
 
 
 (defn- replace-link-error-fn
@@ -810,10 +811,10 @@
 (defn- eval-complete-fns!
   "Detects all completed input reactives, calls complete-fn for each
   link and reactive and returns the results."
-  [{:keys [rid-map links links-map] :as n}]
+  [{:keys [rid-map links links-map] :as n} completed-rs]
   (prof-time
    'eval-complete-fns!
-   (let [completed-rs (->> links
+   (let [#_ completed-rs #_ (->> links
                            (filter :complete-fn)
                            (mapcat link-inputs)
                            (remove nil?)
@@ -822,7 +823,7 @@
          results  (for [r completed-rs
                         [l f] (->> r (get rid-map) links-map
                                    (map (juxt identity :complete-fn))) :when f]
-                    (f l r))]
+                    (do #_(println "COMPLETE-FN" (:label l)) (f l r)))]
      (remove nil? results))))
 
 
@@ -836,7 +837,9 @@
       (try (deliver! r vt)
            (catch IllegalStateException ex
              (enq *netref* {:rvt-map {r vt}})))))
-  (->> rvt-map (map first) (filter pending?)))
+  (let [rs (map first rvt-map)]
+    [(filter pending? rs)
+     (filter completed? rs)]))
 
 
 (defn- consume-values!
@@ -858,11 +861,11 @@
 (defn- propagate!
   "Executes one propagation cycle. Returns the network."
   ([network]
-     (propagate! network [] []))
+     (propagate! network [] [nil nil]))
   ([network pending-reactives]
-     (propagate! network [] pending-reactives))
+     (propagate! network [] [pending-reactives nil]))
   ([{:keys [rid-map links-map level-map pending-completions dont-complete] :as network}
-    pending-links pending-reactives]
+    pending-links [pending-reactives completed-reactives]]
      (do
        (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
        (when (seq pending-completions)
@@ -873,18 +876,17 @@
          (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
      (let [[level
             pending-links
-            link-results]  (eval-links network pending-links pending-reactives)
-
-           completed-rs    (concat (consume-values! link-results) (filter completed? pending-reactives))
-           compl-results   (eval-complete-fns! network)
-           results         (concat link-results compl-results)]
+            link-results]   (eval-links network pending-links pending-reactives)
+            completed-rs    (->> completed-reactives
+                                 (concat (consume-values! link-results))
+                                 set)
+            compl-results   (eval-complete-fns! network completed-rs)
+            results         (concat link-results compl-results)]
        (if (seq results)
          (let [unchanged?      (->> results (remove :no-consume) empty?)
                ;; apply network changes returned by link and complete functions
 
-               network         (-> network
-                                   (update-from-results completed-rs results)
-                                   complete-pending)
+               network         (update-from-results network completed-rs results)
                all-rvts        (->> results (mapcat :output-rvts))
                _               (dump-values "OUTPUTS" all-rvts)
                upstream?       (fn [[r _]]
@@ -904,8 +906,7 @@
                                     pending-links
                                     downstream-rvts)))
          (-> network
-             (remove-links dead?)
-             complete-pending
+             (update-from-results completed-rs nil)
              (assoc :unchanged? true))))))
 
 
@@ -930,16 +931,17 @@
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [network {:keys [exec results add remove-by rvt-map allow-complete]}]
+  [{:keys [rid-map] :as network} {:keys [exec results add remove-by rvt-map allow-complete]}]
   (prof-time
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  (update-from-results nil (conj results {:add add :remove-by remove-by}))
                   (allow-completion allow-complete)
-                  (complete-pending)
+                  (update-from-results (->> rid-map keys (filter completed?))
+                                       (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
-                  (propagate-downstream! nil (mapcat :output-rvts results)))   
+                  (propagate-downstream! nil (mapcat :output-rvts results))
+                  (remove-links dead?))
           prs (pending-reactives n)]
      (let [next-n      (propagate! n prs)
            progress?   (not (:unchanged? next-n))
