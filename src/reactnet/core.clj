@@ -250,6 +250,7 @@
   [xs]
   (mapv #(WeakReference. %) xs))
 
+
 (defn- wref-unwrap
   "Unwraps all WeakReferences and returns the result as vector."
   [wrefs]
@@ -541,10 +542,12 @@
    (update-rid-map n l)
    (let [input-rids  (->> l link-inputs (map (partial get rid-map)))
          output-rids (->> l link-outputs (map (partial get rid-map)))
-         level-map   (->> input-rids
-                          (map level-map)
-                          (map #(vector %1 (or %2 1)) input-rids)
-                          (into level-map))
+         level-map   (reduce (fn [m i]
+                               (if-not (get m i)
+                                 (assoc m i 1)
+                                 m))
+                             level-map
+                             input-rids)
          link-level  (->> input-rids
                           (map level-map)
                           (apply max)
@@ -583,7 +586,7 @@
 (defn- remove-links
   "Removes links specified by predicate or set.
   Returns an updated network."
-  [{:keys [rid-map links links-map level-map pending-completions pending-removes] :as n} pred]
+  [{:keys [rid-map links links-map pending-completions pending-removes] :as n} pred]
   (prof-time
    'remove-links
    (if pred
@@ -593,22 +596,20 @@
          (do (dump-links "REMOVE" links-to-remove)
              (assoc (if (> (or pending-removes 0) 100)
                       (rebuild n remaining-links)
-                      (let [input-rids       (->> links-to-remove
-                                                  (mapcat link-inputs)
-                                                  (map (partial get rid-map)))
-                            links-map        (reduce (fn [lm i]
-                                                       (let [lset (apply disj (get lm i) links-to-remove)]
-                                                         (if (empty? lset)
-                                                           (dissoc lm i)
-                                                           (assoc lm i lset))))
-                                                     links-map
-                                                     input-rids)
-                            level-map        (reduce dissoc level-map links-to-remove) ]
+                      (let [input-rids (->> links-to-remove
+                                            (mapcat link-inputs)
+                                            (map (partial get rid-map)))
+                            links-map  (reduce (fn [lm i]
+                                                 (let [lset (apply disj (get lm i) links-to-remove)]
+                                                   (if (empty? lset)
+                                                     (dissoc lm i)
+                                                     (assoc lm i lset))))
+                                               links-map
+                                               input-rids)]
                         (assoc n
                           :links remaining-links
                           :pending-removes (+ (count links-to-remove) (or pending-removes 0))
-                          :links-map links-map
-                          :level-map level-map)))
+                          :links-map links-map)))
                :pending-completions (concat pending-completions
                                             (->> links-to-remove
                                                  (mapcat :complete-on-remove)))))
@@ -679,13 +680,15 @@
          remove-bys      (->> results
                               (map :remove-by)
                               (remove nil?))
-         remove-by-preds (if (seq links-to-remove)
+         preds           (if (seq links-to-remove)
                            (conj remove-bys links-to-remove)
                            remove-bys)
-         new-links       (->> results (mapcat :add) set)]
+         remove-by-pred  (if (seq preds)
+                           (partial any-pred? preds))
+         new-links       (mapcat :add results)]
      (-> n
          (assoc :dont-complete dont-complete)
-         (update-links (partial any-pred? remove-by-preds) new-links)
+         (update-links remove-by-pred new-links)
          complete-pending))))
 
 
