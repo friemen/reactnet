@@ -360,6 +360,7 @@
 (def monitors {'update-from-results (atom nil)
                'add-link (atom nil)
                'remove-links (atom nil)
+               'dead (atom nil)
                'propagate1 (atom nil)
                'propagate2 (atom nil)
                'propagate3 (atom nil)
@@ -384,7 +385,7 @@
                'test (atom nil)})
 
 
-(def ^:no-doc profile? true)
+(def ^:no-doc profile? false)
 
 (defmacro ^:no-doc prof-time
   [key & exprs]
@@ -604,30 +605,30 @@
    (if pred
      (let [[links-to-remove
             remaining-links] (dissect pred links)]
-       (when (seq links-to-remove)
-         (dump-links "REMOVE" links-to-remove))
-       
-       (assoc (if (> (or pending-removes 0) 100)
-                (rebuild n remaining-links)
-                (let [input-rids       (->> links-to-remove
-                                            (mapcat link-inputs)
-                                            (map (partial get rid-map)))
-                      links-map        (reduce (fn [lm i]
-                                                 (let [lset (apply disj (get lm i) links-to-remove)]
-                                                   (if (empty? lset)
-                                                     (dissoc lm i)
-                                                     (assoc lm i lset))))
-                                               links-map
-                                               input-rids)
-                      level-map        (reduce dissoc level-map links-to-remove) ]
-                  (assoc n
-                    :links remaining-links
-                    :pending-removes (+ (count links-to-remove) (or pending-removes 0))
-                    :links-map links-map
-                    :level-map level-map)))
-         :pending-completions (concat pending-completions
-                                      (->> links-to-remove
-                                           (mapcat :complete-on-remove)))))
+       (if (seq links-to-remove)
+         (do (dump-links "REMOVE" links-to-remove)
+             (assoc (if (> (or pending-removes 0) 100)
+                      (rebuild n remaining-links)
+                      (let [input-rids       (->> links-to-remove
+                                                  (mapcat link-inputs)
+                                                  (map (partial get rid-map)))
+                            links-map        (reduce (fn [lm i]
+                                                       (let [lset (apply disj (get lm i) links-to-remove)]
+                                                         (if (empty? lset)
+                                                           (dissoc lm i)
+                                                           (assoc lm i lset))))
+                                                     links-map
+                                                     input-rids)
+                            level-map        (reduce dissoc level-map links-to-remove) ]
+                        (assoc n
+                          :links remaining-links
+                          :pending-removes (+ (count links-to-remove) (or pending-removes 0))
+                          :links-map links-map
+                          :level-map level-map)))
+               :pending-completions (concat pending-completions
+                                            (->> links-to-remove
+                                                 (mapcat :complete-on-remove)))))
+         n))
      n)))
 
 
@@ -687,32 +688,20 @@
                               (reduce (fn [m r]
                                         (assoc m r (or (some-> r m inc) 1)))
                                       dont-complete))
-         _ (comment
-             links-to-remove (->> completed-rs
-                                  (map (partial get rid-map))
-                                  (mapcat links-map)
-                                  set)
-             remove-by-preds  (->> results
-                                   (map :remove-by)
-                                   (remove nil?))
-             remove-by        (if (empty? links-to-remove)
-                                remove-by-preds
-                                (conj remove-by-preds links-to-remove)))
-         #_ (println (count completed-rs))
-         links-to-remove   (->> results
-                                 (map :remove-by)
-                                 (remove nil?)
-                                 (cons dead?)
-                                 (reduce (fn [ls pred]
-                                           (->> links
-                                                (filter pred)
-                                                (into ls)))
-                                         #{}))
+         links-to-remove (->> completed-rs
+                              (map (partial get rid-map))
+                              (mapcat links-map)
+                              set)
+         remove-bys      (->> results
+                              (map :remove-by)
+                              (remove nil?))
+         remove-by-preds (if (seq links-to-remove)
+                           (conj remove-bys links-to-remove)
+                           (conj remove-bys dead?))
          links-to-add    (->> results (mapcat :add) set)]
      (-> n
          (assoc :dont-complete dont-complete)
-         (update-links links-to-remove links-to-add)
-         #_ (update-links (partial any-pred? remove-by) links-to-add)))))
+         (update-links (partial any-pred? remove-by-preds) links-to-add)))))
 
 
 (defn- replace-link-error-fn
@@ -946,8 +935,7 @@
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  (update-from-results nil results)
-                  (update-links remove-by add)
+                  (update-from-results nil (conj results {:add add :remove-by remove-by}))
                   (allow-completion allow-complete)
                   (complete-pending)
                   (propagate! add (deliver-values! rvt-map))
