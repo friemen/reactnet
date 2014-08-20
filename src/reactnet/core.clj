@@ -780,11 +780,13 @@
   [{:keys [rid-map links links-map] :as n}]
   (prof-time
    'eval-complete-fns!
-   (let [results  (for [r (->> links
-                               (mapcat link-inputs)
-                               (remove nil?)
-                               set
-                               (filter completed?))
+   (let [completed-rs (->> links
+                           (filter :complete-fn)
+                           (mapcat link-inputs)
+                           (remove nil?)
+                           (filter completed?)
+                           set)
+         results  (for [r completed-rs
                         [l f] (->> r (get rid-map) links-map
                                    (map (juxt identity :complete-fn))) :when f]
                     (f l r))]
@@ -882,8 +884,7 @@
             link-results]  (eval-pending-reactives network pending-links pending-reactives)
 
            
-           completed-rs    (concat (consume-values! link-results)
-                                   (filter completed? pending-reactives))
+           completed-rs    (concat (consume-values! link-results) (filter completed? pending-reactives))
            compl-results   (eval-complete-fns! network)
            results         (concat link-results compl-results)
 
