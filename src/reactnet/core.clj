@@ -379,7 +379,7 @@
                'propagateh (atom nil)
                'pending-reactives (atom nil)
                'update-and-propagate! (atom nil)
-               'eval-link! (atom nil)
+               'eval-links (atom nil)
                'eval-complete-fns! (atom nil)
                'test (atom nil)})
 
@@ -405,7 +405,7 @@
 
 (defn ^:no-doc print-monitors
   []
-  (doseq [[s a] monitors]
+  (doseq [[s a] (sort-by first monitors)]
     (println s @a)))
 
 
@@ -493,10 +493,11 @@
   [link]
   (let [inputs (link-inputs link)
         outputs (link-outputs link)]
-    (or (empty? inputs)
-        (some nil? inputs)
-        (some completed? inputs)
-        (and (seq outputs) (every? completed? (remove nil? outputs))))))
+    (or (some completed? inputs)
+        (and (seq outputs)
+             (->> outputs
+                  (remove nil?)
+                  (every? completed?))))))
 
 
 (defn ^:no-doc pending-reactives
@@ -506,7 +507,6 @@
    'pending-reactives
    (->> rid-map
         keys
-        (remove nil?)
         (filter pending?)
         doall)))
 
@@ -601,32 +601,34 @@
   [{:keys [rid-map links links-map level-map pending-completions pending-removes] :as n} pred]
   (prof-time
    'remove-links
-   (let [[links-to-remove
-          remaining-links] (dissect pred links)]
-     (when (seq links-to-remove)
-       (dump-links "REMOVE" links-to-remove))
-     
-     (assoc (if (> (or pending-removes 0) 100)
-              (rebuild n remaining-links)
-              (let [input-rids       (->> links-to-remove
-                                          (mapcat link-inputs)
-                                          (map (partial get rid-map)))
-                    links-map        (reduce (fn [lm i]
-                                               (let [lset (apply disj (get lm i) links-to-remove)]
-                                                 (if (empty? lset)
-                                                   (dissoc lm i)
-                                                   (assoc lm i lset))))
-                                             links-map
-                                             input-rids)
-                    level-map        (reduce dissoc level-map links-to-remove) ]
-                (assoc n
-                  :links remaining-links
-                  :pending-removes (+ (count links-to-remove) (or pending-removes 0))
-                  :links-map links-map
-                  :level-map level-map)))
-       :pending-completions (concat pending-completions
-                                    (->> links-to-remove
-                                         (mapcat :complete-on-remove)))))))
+   (if pred
+     (let [[links-to-remove
+            remaining-links] (dissect pred links)]
+       (when (seq links-to-remove)
+         (dump-links "REMOVE" links-to-remove))
+       
+       (assoc (if (> (or pending-removes 0) 100)
+                (rebuild n remaining-links)
+                (let [input-rids       (->> links-to-remove
+                                            (mapcat link-inputs)
+                                            (map (partial get rid-map)))
+                      links-map        (reduce (fn [lm i]
+                                                 (let [lset (apply disj (get lm i) links-to-remove)]
+                                                   (if (empty? lset)
+                                                     (dissoc lm i)
+                                                     (assoc lm i lset))))
+                                               links-map
+                                               input-rids)
+                      level-map        (reduce dissoc level-map links-to-remove) ]
+                  (assoc n
+                    :links remaining-links
+                    :pending-removes (+ (count links-to-remove) (or pending-removes 0))
+                    :links-map links-map
+                    :level-map level-map)))
+         :pending-completions (concat pending-completions
+                                      (->> links-to-remove
+                                           (mapcat :complete-on-remove)))))
+     n)))
 
 
 (defn- apply-exec
@@ -686,18 +688,18 @@
                                         (assoc m r (or (some-> r m inc) 1)))
                                       dont-complete))
          _ (comment
-           links-to-remove (->> completed-rs
-                                (map (partial get rid-map))
-                                (mapcat links-map)
-                                set)
-           remove-by-preds  (->> results
-                                 (map :remove-by)
-                                 (remove nil?))
-           remove-by        (if (empty? links-to-remove)
-                              remove-by-preds
-                              (conj remove-by-preds links-to-remove)))
+             links-to-remove (->> completed-rs
+                                  (map (partial get rid-map))
+                                  (mapcat links-map)
+                                  set)
+             remove-by-preds  (->> results
+                                   (map :remove-by)
+                                   (remove nil?))
+             remove-by        (if (empty? links-to-remove)
+                                remove-by-preds
+                                (conj remove-by-preds links-to-remove)))
          #_ (println (count completed-rs))
-         links-to-remove  (->> results
+         links-to-remove   (->> results
                                  (map :remove-by)
                                  (remove nil?)
                                  (cons dead?)
@@ -749,29 +751,71 @@
     (merge input result error-result)))
 
 
+(defn- next-values
+  "Peeks all values from reactives, without consuming them. 
+  Returns a map {Reactive -> [value timestamp]}."
+  [reactives]
+  (reduce (fn [rvt-map r]
+            (assoc rvt-map r (next-value r)))
+          {}
+          reactives))
+
+
 (defn- eval-link!
   "Evaluates one link (possibly using the links executor), returning a Result map."
   [rvt-map {:keys [link-fn level executor] :as link}]
+  (let [inputs  (link-inputs link)
+        outputs (->> link link-outputs (remove nil?))
+        input   {:link link
+                 :input-reactives inputs 
+                 :input-rvts (for [r inputs] [r (rvt-map r)])
+                 :output-reactives outputs
+                 :output-rvts nil}
+        netref  *netref*]
+    (if executor
+      (do (execute executor
+                   netref
+                   (fn []
+                     (let [result-map (safely-exec-link-fn link input)]
+                       ;; send changes / values to netref
+                       (enq netref {:results [result-map]
+                                    :allow-complete (set outputs)}))))
+          (assoc input :dont-complete (set outputs)))
+      (safely-exec-link-fn link input))))
+
+
+(defn- eval-links
+  "Evaluates all links for pending reactives and returns a vector
+  [level pending-links link-results]."
+  [{:keys [rid-map links-map level-map] :as n} pending-links pending-reactives]
   (prof-time
-   'eval-link!
-   (let [inputs  (link-inputs link)
-         outputs (->> link link-outputs (remove nil?))
-         input   {:link link
-                  :input-reactives inputs 
-                  :input-rvts (for [r inputs] [r (rvt-map r)])
-                  :output-reactives outputs
-                  :output-rvts nil}
-         netref  *netref*]
-     (if executor
-       (do (execute executor
-                    netref
-                    (fn []
-                      (let [result-map (safely-exec-link-fn link input)]
-                        ;; send changes / values to netref
-                        (enq netref {:results [result-map]
-                                     :allow-complete (set outputs)}))))
-           (assoc input :dont-complete (set outputs)))
-       (safely-exec-link-fn link input)))))
+   'eval-links
+   (let [links           (->> pending-reactives
+                              (map (partial get rid-map))
+                              (mapcat links-map)
+                              (concat pending-links)
+                              (sort-by level-map (comparator <))
+                              distinct)
+         
+         _               (dump-links "CANDIDATES" links)
+         available-links (->> links
+                              (filter ready?)
+                              doall)]
+     (if (seq available-links)
+       (let [level           (or (-> available-links first level-map) 0)             
+             same-level?     (fn [l] (= (level-map l) level))
+             [current-links
+              pending-links] (dissect same-level? available-links)
+             rvt-map         (->> current-links
+                                  (mapcat link-inputs)
+                                  distinct
+                                  next-values)
+             _               (dump-values "INPUTS" rvt-map)
+             link-results    (->> current-links
+                                  (map (partial eval-link! rvt-map))
+                                  doall)]
+         [level pending-links link-results])
+       [0 nil nil]))))
 
 
 (defn- eval-complete-fns!
@@ -793,29 +837,6 @@
      (remove nil? results))))
 
 
-(defn- next-values
-  "Peeks all values from reactives, without consuming them. 
-  Returns a map {Reactive -> [value timestamp]}."
-  [reactives]
-  (reduce (fn [rvt-map r]
-            (assoc rvt-map r (next-value r)))
-          {}
-          reactives))
-
-
-(defn- consume-values!
-  "Consumes all values from reactives contained in evaluation results. 
-  Returns a seq of completed reactives."
-  [results]
-  (let [reactives (->> results
-                       (remove :no-consume)
-                       (mapcat :input-reactives)
-                       set)]
-    (doseq [r reactives]
-      (consume! r))
-    (filter completed? reactives)))
-
-
 (defn- deliver-values!
   "Updates all reactives from the reactive-values map and returns a
   seq of pending reactives."
@@ -829,32 +850,17 @@
   (->> rvt-map (map first) (filter pending?)))
 
 
-
-(defn- eval-pending-reactives
-  [{:keys [rid-map links-map level-map] :as n} pending-links pending-reactives]
-  (let [links           (->> pending-reactives
-                             (map (partial get rid-map))
-                             (mapcat links-map)
-                             (concat pending-links)
-                             (sort-by level-map (comparator <))
-                             distinct)
-        _               (dump-links "CANDIDATES" links)
-        available-links (->> links
-                             (filter ready?)
-                             doall)
-        level           (or (-> available-links first level-map) 0)
-        same-level?     (fn [l] (= (level-map l) level))
-        [current-links
-         pending-links] (dissect same-level? available-links)
-        rvt-map         (->> current-links
-                             (mapcat link-inputs)
-                             distinct
-                             next-values)
-        _               (dump-values "INPUTS" rvt-map)
-        link-results    (->> current-links
-                             (map (partial eval-link! rvt-map)))]
-    [level pending-links link-results]))
-
+(defn- consume-values!
+  "Consumes all values from reactives contained in evaluation results. 
+  Returns a seq of completed reactives."
+  [results]
+  (let [reactives (->> results
+                       (remove :no-consume)
+                       (mapcat :input-reactives)
+                       set)]
+    (doseq [r reactives]
+      (consume! r))
+    (filter completed? reactives)))
 
 
 (declare propagate-downstream!)
@@ -876,44 +882,42 @@
          (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
        (when (seq pending-reactives)
          (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
-     (let [#_ network         #_ (if (empty? pending-reactives)
-                             (remove-links network dead?)
-                             network)
-           [level
+     (let [[level
             pending-links
-            link-results]  (eval-pending-reactives network pending-links pending-reactives)
+            link-results]  (eval-links network pending-links pending-reactives)
 
-           
            completed-rs    (concat (consume-values! link-results) (filter completed? pending-reactives))
            compl-results   (eval-complete-fns! network)
-           results         (concat link-results compl-results)
+           results         (concat link-results compl-results)]
+       (if (seq results)
+         (let [unchanged?      (->> results (remove :no-consume) empty?)
+               ;; apply network changes returned by link and complete functions
 
-           
-           unchanged?      (->> results (remove :no-consume) empty?)
-           
-           ;; apply network changes returned by link and complete functions
-           network         (-> network
-                               (update-from-results completed-rs results)
-                               complete-pending)
-           all-rvts        (->> results (mapcat :output-rvts))
-           _               (dump-values "OUTPUTS" all-rvts)
-           upstream?       (fn [[r _]]
-                             (let [r-level (level-map (get rid-map r))]
-                               (or (nil? r-level) (< r-level level))))
-           downstream-rvts (->> all-rvts
-                                (remove upstream?)
-                                (sort-by #(level-map (get rid-map (first %))) (comparator <)))
-           upstream-rvts   (->> all-rvts (filter upstream?))]
-       
-       ;; push value into next cycle if reactive level is either
-       ;; unknown or is lower than current level
-       (doseq [[r [v t]] upstream-rvts]
-         (enq *netref* {:rvt-map {r [v t]}}))
-       (if unchanged?
-         (assoc network :unchanged? true)
-         (propagate-downstream! network
-                                pending-links
-                                downstream-rvts)))))
+               network         (-> network
+                                   (update-from-results completed-rs results)
+                                   complete-pending)
+               all-rvts        (->> results (mapcat :output-rvts))
+               _               (dump-values "OUTPUTS" all-rvts)
+               upstream?       (fn [[r _]]
+                                 (let [r-level (level-map (get rid-map r))]
+                                   (or (nil? r-level) (< r-level level))))
+               downstream-rvts (->> all-rvts
+                                    (remove upstream?)
+                                    (sort-by #(level-map (get rid-map (first %))) (comparator <)))
+               upstream-rvts   (->> all-rvts (filter upstream?))]
+           ;; push value into next cycle if reactive level is either
+           ;; unknown or is lower than current level
+           (doseq [[r [v t]] upstream-rvts]
+             (enq *netref* {:rvt-map {r [v t]}}))
+           (if unchanged?
+             (assoc network :unchanged? true)
+             (propagate-downstream! network
+                                    pending-links
+                                    downstream-rvts)))
+         (-> network
+             (remove-links dead?)
+             complete-pending
+             (assoc :unchanged? true))))))
 
 
 (defn- propagate-downstream!
@@ -943,7 +947,7 @@
    (loop [n   (-> network
                   (apply-exec exec)
                   (update-from-results nil results)
-                  (update-links (or remove-by #{}) add)
+                  (update-links remove-by add)
                   (allow-completion allow-complete)
                   (complete-pending)
                   (propagate! add (deliver-values! rvt-map))
