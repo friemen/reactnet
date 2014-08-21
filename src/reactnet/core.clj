@@ -5,7 +5,6 @@
            [java.util WeakHashMap]))
 
 ;; TODO
-;; Fix on-error / add on-error test
 ;; Fix weakref test
 ;; improve monitoring
 ;; - dynamic monitor creation
@@ -87,9 +86,11 @@
 ;;   :links-map           Map {rid -> Seq of links} (derived)
 ;;   :dont-complete       Map {Reactive -> c} of reactives that are not
 ;;                        automatically completed as long as c > 0
-;;   :pending-completions A seq of reactives that will receive ::completed
+;;   :completions         A seq of reactives that will receive ::completed
 ;;                        as soon as they are not contained in the
 ;;                        :dont-complete map
+;;   :removes             An integer counting how many removes there have
+;;                        in order to decide when to rebuild the level-map
 
 ;; Stimulus
 ;; A map containing data that is passed to enq/update-and-propagate! to
@@ -324,7 +325,7 @@
   [id links]
   (rebuild {:id id
             :dont-complete {}
-            :pending-completions nil} links))
+            :completions nil} links))
 
 
 
@@ -582,15 +583,17 @@
 (defn- remove-links
   "Removes links specified by predicate or set.
   Returns an updated network."
-  [{:keys [rid-map links links-map pending-completions pending-removes] :as n} pred]
-  (prof-time
-   'remove-links
-   (if pred
-     (let [[links-to-remove
-            remaining-links] (dissect pred links)]
-       (if (seq links-to-remove)
-         (do (dump-links "REMOVE" links-to-remove)
-             (assoc (if (> (or pending-removes 0) 100)
+  ([n pred]
+     (remove-links n pred true))
+  ([{:keys [rid-map links links-map completions pending-removes] :as n} pred completion?]
+     (prof-time
+      'remove-links
+      (if pred
+        (let [[links-to-remove
+               remaining-links] (dissect pred links)]
+          (if (seq links-to-remove)
+            (let [_ (dump-links "REMOVE" links-to-remove)
+                  n (if (> (or pending-removes 0) 100)
                       (rebuild n remaining-links)
                       (let [input-rids (->> links-to-remove
                                             (mapcat link-inputs)
@@ -605,11 +608,13 @@
                         (assoc n
                           :links remaining-links
                           :pending-removes (+ (count links-to-remove) (or pending-removes 0))
-                          :links-map links-map)))
-               :pending-completions (concat pending-completions
-                                            (mapcat :complete-on-remove links-to-remove))))
-         n))
-     n)))
+                          :links-map links-map)))]
+              (if completion?
+                (assoc n :completions (concat completions
+                                                      (mapcat :complete-on-remove links-to-remove)))
+                n))
+            n))
+        n))))
 
 
 (defn- apply-exec
@@ -624,13 +629,13 @@
 
 (defn- complete-pending
   "Asynchronously completes all reactives contained in
-  the :pending-completions set of the network n. Excludes reactives
+  the :completions set of the network n. Excludes reactives
   contained in the :dont-complete map. Returns an updated network."
-  [{:keys [pending-completions dont-complete] :as n}]
-  (let [[remaining completables] (dissect dont-complete pending-completions)]
+  [{:keys [completions dont-complete] :as n}]
+  (let [[remaining completables] (dissect dont-complete completions)]
     (doseq [r completables]
       (enq *netref* {:rvt-map {r [::completed (now)]}}))
-    (assoc n :pending-completions remaining)))
+    (assoc n :completions remaining)))
 
 
 (defn- allow-completion
@@ -660,7 +665,7 @@
 (defn- update-from-results
   "Takes a network and a seq of result maps and adds / removes links.
   Returns an updated network."
-  [{:keys [links rid-map links-map dont-complete] :as n} completed-rs results]
+  [{:keys [rid-map links-map dont-complete] :as n} completed-rs results]
   (prof-time
    'update-from-results
    (let [dont-complete   (->> results
@@ -683,19 +688,18 @@
          new-links       (mapcat :add results)]
      (-> n
          (assoc :dont-complete dont-complete)
-         (update-links remove-by-pred new-links)
+         (update-links remove-by-pred new-links)         
          complete-pending))))
 
 
 (defn- replace-link-error-fn
-  "Match the first link by pred, attach the error-fn and replace the
+  "Match links by pred, attach the error-fn and replace the
   link. Returns an updated network."
-  [{:keys [id links] :as n} pred error-fn]
-  (let [[matched others] (dissect pred links)]
-    (assoc n
-      :links (conj others (assoc (first matched) :error-fn error-fn))
-      ;; TODO replace link everywhere in links AND level-map, uh!
-      )))
+  [{:keys [links] :as n} pred error-fn]
+  (let [links (->> links
+                   (filter pred)
+                   (map #(assoc % :error-fn error-fn)))]
+    (reduce add-link (remove-links n pred false) links)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -771,8 +775,7 @@
          
          _               (dump-links "CANDIDATES" links)
          available-links (->> links
-                              (filter ready?)
-                              doall)]
+                              (filter ready?))]
      (if (seq available-links)
        (let [level           (or (-> available-links first level-map) 0)             
              same-level?     (fn [l] (= (level-map l) level))
@@ -840,12 +843,12 @@
      (propagate! network [] [nil nil]))
   ([network pending-reactives]
      (propagate! network [] [pending-reactives nil]))
-  ([{:keys [rid-map links-map level-map pending-completions dont-complete] :as network}
+  ([{:keys [rid-map links-map level-map completions dont-complete] :as network}
     pending-links [pending-reactives completed-reactives]]
      (do
        (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
-       (when (seq pending-completions)
-         (dump "  PENDING COMPLETIONS:" (->> pending-completions (map :label) (s/join ", "))))
+       (when (seq completions)
+         (dump "  PENDING COMPLETIONS:" (->> completions (map :label) (s/join ", "))))
        (when (seq dont-complete)
          (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
        (when (seq pending-reactives)
@@ -910,11 +913,12 @@
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  (allow-completion allow-complete)
+                  #_ (allow-completion allow-complete) ; might be too early
                   (update-from-results (->> rid-map keys (filter completed?))
                                        (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
-                  (propagate-downstream! nil (mapcat :output-rvts results)))
+                  (propagate-downstream! nil (mapcat :output-rvts results))
+                  (allow-completion allow-complete))
           prs (pending-reactives n)]
      (let [next-n      (propagate! n prs)
            progress?   (not (:unchanged? next-n))

@@ -10,7 +10,7 @@ The goal is a core for a push-based reactive library that is designed
 to avoid inconsistencies and bouncing effects and gracefully handles
 infinite loops caused by cyclic dependencies.
 
-It will be the core of a [reactor](https://github.com/friemen/reactor)
+It will be the foundation of a [reactor](https://github.com/friemen/reactor)
 re-implementation.
 
 Key ideas of reactnet are:
@@ -363,14 +363,16 @@ A map containing the following entries
   :id                  A string containing an identifier
   :links               Collection of links
   :rid-map             WeakHashMap {Reactive -> rid} (derived)
+  :next-rid            Atom containing the next rid to assign
   :level-map           Map {rid -> topological-level} (derived)
   :links-map           Map {rid -> Seq of links} (derived)
   :dont-complete       Map {Reactive -> c} of reactives that are not
                        automatically completed as long as c > 0 
-  :pending-completions A seq of reactives that will receive ::completed
+  :completions         A seq of reactives that will receive ::completed
                        as soon as they are not contained in the
 					   :dont-complete map
-  :rebuild?            Flag if links have been added/removed
+  :removes             An integer counting how many removes there have
+                       in order to decide when to rebuild the level-map
 ```
 
 `rid` is a reactive identifier, an integer which is unique within a network.
@@ -558,6 +560,7 @@ TODO Show some implementations of reactor
 TODO Give some more background on
 
 * Topological levels
+* Monitoring
 * WeakHashMap / WeakReferences for outputs
 
 
@@ -566,10 +569,12 @@ TODO Give some more background on
 The `propagate!` function is the heart of the algorithm, and it works
 recursively. The maximum recursion depth corresponds to the
 topological height of the network. It is usually invoked in the form
-of `(propagate! network pending-links pending-reactives)`. The arguments are:
+of `(propagate! network pending-links [pending-reactives completed-reactives])`.
+The arguments are:
 * the network,
-* any links from a prior call to it that weren't evaluated so far
-* and any reactives that are known to have pending values.
+* any links from a prior call to it that weren't evaluated so far,
+* any reactives that are known to have pending values,
+* and reactives that are known to be completed.
 
 Steps:
 

@@ -48,6 +48,7 @@
   (testing "Just one value"
     (let [r  (atom [])
           j  (r/just 42)]
+      (wait)
       (is (rn/pending? j))
       (r/swap! r conj j)
       (wait)
@@ -392,7 +393,7 @@
       (is (rn/completed? c)))))
 
 
-(deftest reduce-test
+(deftest reduce-t
   (let [r      (atom [])
         values (range 1 5)
         e      (r/eventstream)
@@ -596,7 +597,7 @@
     x))
 
 
-#_ (deftest err-ignore-test
+(deftest err-ignore-test
   (let [r (atom [])
         e (r/eventstream)
         c (->> e
@@ -607,7 +608,7 @@
     (is (= [1 2 3] @r))))
 
 
-#_ (deftest err-retry-after-test
+(deftest err-retry-after-test
   (let [r (atom [])
         n (atom 2)
         e (r/eventstream)
@@ -623,7 +624,7 @@
     (is (= [1 2 3 42] @r))))
 
 
-#_ (deftest err-return-test
+(deftest err-return-test
   (let [r  (atom [])
         e  (r/eventstream)
         c  (->> e
@@ -634,7 +635,7 @@
     (is (= [1 2 99 3] @r))))
 
 
-#_ (deftest err-switch-test
+(deftest err-switch-test
   (let [r  (atom [])
         e1 (r/eventstream :label "e1")
         e2 (r/seqstream (range 5) :label "e2")
@@ -646,7 +647,7 @@
     (is (= [1 2 0 1 2 3 4] @r))))
 
 
-#_ (deftest err-into-test
+(deftest err-into-test
   (let [r      (atom [])
         errors (r/eventstream :label "errors")
         e      (r/eventstream :label "e")

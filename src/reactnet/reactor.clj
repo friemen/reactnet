@@ -1111,8 +1111,9 @@
         s      (scheduler netref)]
     (on-error *netref* r
               (fn [{:keys [input-rvts]}]
-                (sched/once s millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))}))
-                {}))))
+                (sched/once s millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))
+                                                   :allow-complete #{r}}))
+                {:dont-complete #{r}}))))
 
 
 (defn err-return
