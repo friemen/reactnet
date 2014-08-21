@@ -394,7 +394,7 @@
                                     (link (partial swap! r conj) [e2 e3] [])]))
           (push! e1 15)
           (Thread/sleep 50)
-          (is (= 5 (-> rn/*netref* :n-agent .getQueueCount)))
+          (is (<= 5 (-> rn/*netref* :n-agent .getQueueCount)))
           (dotimes [i 15]
             (Thread/sleep 10)
             (push! e3 i))
