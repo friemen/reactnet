@@ -74,6 +74,7 @@
 ;;   :remove-by           A predicate that matches links to be removed
 ;;                        from the network
 ;;   :dont-complete       A seq of reactives that must not be completed automatically
+;;   :allow-complete      A set of reactives that may be allowed for completion
 
 ;; Network:
 ;; A map containing
@@ -100,8 +101,6 @@
 ;;   :remove-by           A predicate matching links to remove from the network
 ;;   :add                 A seq of links to add to the network
 ;;   :rvt-map             A map {Reactive -> [v t]} of values to propagate
-;;   :allow-complete      A set of reactives for which to decrease the
-;;                        dont-complete counter
 
 ;; NetworkRef:
 ;; Serves as abstraction of how the network is stored and
@@ -611,7 +610,7 @@
                           :links-map links-map)))]
               (if completion?
                 (assoc n :completions (concat completions
-                                                      (mapcat :complete-on-remove links-to-remove)))
+                                              (mapcat :complete-on-remove links-to-remove)))
                 n))
             n))
         n))))
@@ -638,21 +637,6 @@
     (assoc n :completions remaining)))
 
 
-(defn- allow-completion
-  "Decreases the pending evaluations counter in
-  networks :dont-complete map and removes reactives if completion is
-  allowed again.  Returns an updated network."
-  [{:keys [dont-complete] :as n} rs]
-  (->> rs
-       (reduce (fn [m r]
-                 (let [c (or (some-> r m dec) 0)]
-                   (if (> c 0)
-                     (assoc m r c)
-                     (dissoc m r))))
-               dont-complete)
-       (assoc n :dont-complete)))
-
-
 (defn- update-links
   "Removes links specified by the predicate or set and conjoins
   new-links to the networks links. Returns an updated network."
@@ -669,9 +653,16 @@
   (prof-time
    'update-from-results
    (let [dont-complete   (->> results
-                              (mapcat :dont-complete)
-                              (reduce (fn [m r]
-                                        (assoc m r (or (some-> r m inc) 1)))
+                              (mapcat (fn [result]
+                                        (concat (->> result :dont-complete
+                                                     (map vector (repeat 1)))
+                                                (->> result :allow-complete
+                                                     (map vector (repeat -1))))))
+                              (reduce (fn [m [diff r]]
+                                        (let [c (max 0 (+ diff (or (get m r) 0)))]
+                                          (if (> c 0)
+                                            (assoc m r c)
+                                            (dissoc m r))))
                                       dont-complete))
          links-to-remove (->> completed-rs
                               (map (partial get rid-map))
@@ -754,8 +745,7 @@
                    (fn []
                      (let [result-map (safely-exec-link-fn link input)]
                        ;; send changes / values to netref
-                       (enq netref {:results [result-map]
-                                    :allow-complete (set outputs)}))))
+                       (enq netref {:results [result-map {:allow-complete (set outputs)}]}))))
           (assoc input :dont-complete (set outputs)))
       (safely-exec-link-fn link input))))
 
@@ -812,7 +802,8 @@
   [rvt-map]
   (doseq [[r vt] rvt-map]
     (if (completed? r)
-      (dump "WARNING: trying to deliver" vt "into completed" r)
+      (when (not= (first vt) ::completed)
+        (dump "WARNING: trying to deliver" vt "into completed" r))
       (try (deliver! r vt)
            (catch IllegalStateException ex
              (enq *netref* {:rvt-map {r vt}})))))
@@ -863,16 +854,18 @@
             results         (concat link-results compl-results)]
        (if (seq results)
          (let [unchanged?      (->> results (remove :no-consume) empty?)
-               ;; apply network changes returned by link and complete functions
-
-               network         (update-from-results network completed-rs results)
-               all-rvts        (mapcat :output-rvts results)
-               _               (dump-values "OUTPUTS" all-rvts)
                upstream?       (fn [[r _]]
                                  (let [r-level (level-map (get rid-map r))]
                                    (or (nil? r-level) (< r-level level))))
+               all-rvts        (mapcat :output-rvts results)
+               _               (dump-values "OUTPUTS" all-rvts)
+               [compl-rvts
+                value-rvts]    (dissect (fn [[_ [v _]]] (= v ::completed)) all-rvts)
+               ;; apply network changes returned by link and complete functions
+               network         (update-in (update-from-results network completed-rs results)
+                                          [:completions] concat (map first compl-rvts))
                [upstream-rvts
-                downstream-rvts] (dissect upstream? all-rvts)]
+                downstream-rvts] (dissect upstream? value-rvts)]
            ;; push value into next cycle if reactive level is either
            ;; unknown or is lower than current level
            (doseq [[r [v t]] upstream-rvts]
@@ -908,17 +901,15 @@
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [{:keys [rid-map] :as network} {:keys [exec results add remove-by rvt-map allow-complete]}]
+  [{:keys [rid-map] :as network} {:keys [exec results add remove-by rvt-map]}]
   (prof-time
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  #_ (allow-completion allow-complete) ; might be too early
                   (update-from-results (->> rid-map keys (filter completed?))
                                        (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
-                  (propagate-downstream! nil (mapcat :output-rvts results))
-                  (allow-completion allow-complete))
+                  (propagate-downstream! nil (mapcat :output-rvts results)))
           prs (pending-reactives n)]
      (let [next-n      (propagate! n prs)
            progress?   (not (:unchanged? next-n))

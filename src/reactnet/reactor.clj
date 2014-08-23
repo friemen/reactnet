@@ -119,49 +119,13 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; Enqueuing reactives and switching bewteen them
-
-(defn- make-reactive-queue
-  ([output]
-     (make-reactive-queue output nil))
-  ([output rs]
-     {:queue (vec rs)
-      :input nil
-      :output output}))
-
-
-(defn- switch-reactive
-  [{:keys [queue input output] :as queue-state} q-atom]
-  (let [uncompleted (c/remove completed? queue)
-        r           (first uncompleted)]
-    ;; there exists an uncompleted reactive,
-    ;; and either there is no current or it is completed
-    (if (and r (or (nil? input) (completed? input)))
-      ;; the output == input causes output to be completed!
-      (if (= r output)
-        (assoc queue-state
-          :queue []
-          :input nil
-          :output-rvts (single-value :reactnet.core/completed output))
-        (assoc queue-state
-          :queue (vec (rest uncompleted))
-          :input r
-          :add [(make-link "temp" [r] [output]
-                           :complete-fn
-                           (fn [_ r]
-                             (c/merge (c/swap! q-atom switch-reactive q-atom)
-                                      {:remove-by #(= [r] (link-inputs %))})))]))
-      (assoc queue-state
-        :add nil))))
-
-
-(defn- enqueue-reactive
-  [queue-state q-atom r]
-  (switch-reactive (update-in queue-state [:queue] conj r) q-atom))
-
-
-;; ---------------------------------------------------------------------------
 ;; Misc internal utils
+
+(defn- unique-name
+  "Returns a unique name with the prefix s."
+  [s]
+  (str (gensym s)))
+
 
 (defn- countdown
   "Returns a function that accepts any args and return n times true,
@@ -197,7 +161,7 @@
    & {:keys [link-fn complete-fn error-fn]
       :or {link-fn default-link-fn}}]
   {:pre [(seq inputs)]}
-  (let [new-r (factory-fn :label label)]
+  (let [new-r (factory-fn :label (unique-name label))]
     (add-links! *netref* (make-link label inputs [new-r]
                                     :link-fn link-fn
                                     :complete-fn complete-fn
@@ -265,6 +229,45 @@
 
 
 ;; ---------------------------------------------------------------------------
+;; Enqueuing reactives and switching bewteen them
+
+(defn- make-reactive-queue
+  ([output]
+     (make-reactive-queue output nil))
+  ([output rs]
+     {:queue (vec rs)
+      :input nil
+      :output output}))
+
+
+(defn- switch-reactive
+  [{:keys [queue input output] :as queue-state} q-atom]
+  (let [r           (first queue)
+        no-input?   (or (nil? input) (completed? input))]
+    (if (and r no-input?)
+      ;; a new r is available, and there is no current input or it is completed
+      {:output output
+       :queue  (vec (rest queue))
+       :input  r
+       :add    [(make-link "temp" [r] [output]
+                           :complete-fn
+                           (fn [_ r]
+                             (c/merge (c/swap! q-atom switch-reactive q-atom)
+                                      {:remove-by #(= [r] (link-inputs %))
+                                       :allow-complete #{output}})))]}
+      ;; else, don't change anything
+      {:output output
+       :queue queue
+       :input input})))
+
+
+(defn- enqueue-reactive
+  [queue-state q-atom r]
+  (assoc (switch-reactive (update-in queue-state [:queue] conj r) q-atom)
+    :dont-complete #{(:output queue-state)}))
+
+
+;; ---------------------------------------------------------------------------
 ;; Queue to be used with an atom or agent
 
 (defn- make-queue
@@ -324,7 +327,7 @@
   - an IDeref implementation, or 
   - a value."
   [{:keys [executor f] :as x}]
-  (let [new-r  (eventstream :label "just")
+  (let [new-r  (eventstream :label (unique-name "just"))
         f      (sample-fn (if (and executor f) f x))
         task-f (fn []
                  (rn/push! new-r (f))
@@ -347,7 +350,7 @@
   [millis {:keys [executor f] :as x}]
   (let [netref  *netref*
         s       (scheduler netref)
-        new-r   (eventstream :label "sample")
+        new-r   (eventstream :label (unique-name "sample"))
         f       (sample-fn (if (and executor f) f x))
         task    (atom nil)
         push-f  (fn [] (if (completed? new-r)
@@ -378,7 +381,7 @@
   (let [netref  *netref*
         s       (scheduler netref)
         ticks   (atom 0)
-        new-r   (behavior 0 :label "timer")
+        new-r   (behavior 0 :label (unique-name "timer"))
         task    (atom nil)
         task-f  (fn []
                   (if (completed? new-r)
@@ -402,7 +405,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream :label "amb")
+  (let [new-r   (eventstream :label (unique-name "amb"))
         f       (fn [{:keys [input-reactives input-rvts] :as input}]
                   (let [r (first input-reactives)]
                     {:remove-by #(= (link-outputs %) [new-r])
@@ -500,7 +503,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream :label "concat")
+  (let [new-r   (eventstream :label (unique-name "concat"))
         state   (atom (make-reactive-queue new-r (c/concat rs [new-r])))
         link    (-> (c/swap! state switch-reactive state) :add first)]
     (add-links! *netref* link)
@@ -537,7 +540,7 @@
                         netref *netref*
                         s      (scheduler netref)
                         new-t  (sched/once s millis #(rn/enq netref {:rvt-map {output [v (now)]}
-                                                                     :allow-complete #{output}}))]
+                                                                     :results [{:allow-complete #{output}}]}))]
                     (when (and old-t (sched/pending? old-t))
                       (sched/cancel old-t))
                     (reset! task new-t)
@@ -558,7 +561,7 @@
                   (let [output (first output-reactives)
                         v      (fvalue input-rvts)]
                     (sched/once s millis #(rn/enq netref {:rvt-map {output [v (now)]}
-                                                          :allow-complete #{output}}))
+                                                          :results [{:allow-complete #{output}}]}))
                     {:dont-complete #{output}})))))
 
 
@@ -633,7 +636,6 @@
                                                      (fvalue input-rvts)
                                                      ex)))))))
 
-
 (defn flatmap
   "Returns an eventstream that passes each item of r to a function
   f [x -> Reactive]. Consecutively emits all items of those resulting
@@ -642,13 +644,11 @@
   {:pre [(fn-spec? f) (reactive? r)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
-        new-r    (eventstream :label "flatmap")
+        new-r    (eventstream :label (unique-name "flatmap"))
         state    (atom (make-reactive-queue new-r)) ]
     (add-links! *netref* (make-link "flatmap" [r] [new-r]
+                                    :complete-on-remove [new-r]
                                     :executor executor
-                                    :complete-fn
-                                    (fn [l r]
-                                      (c/swap! state enqueue-reactive state new-r))
                                     :link-fn
                                     (fn [{:keys [input-rvts] :as input}]
                                       (let [r (f (fvalue input-rvts))]
@@ -730,7 +730,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream :label "merge")
+  (let [new-r   (eventstream :label (unique-name "merge"))
         inputs  (atom (set rs))
         links   (->> rs (c/map #(make-link "merge" [%] [new-r]
                                            :complete-fn (fn [l r]
@@ -819,7 +819,7 @@
   [r]
   {:pre [(reactive? r)]
    :post [(reactive? %)]}
-  (let [new-r (eventstream :label "switch")]
+  (let [new-r (eventstream :label (unique-name "switch"))]
     (add-links! *netref*
                 (make-link "switcher" [r] [] ;; must not point to an output reactive
                            :link-fn
@@ -886,7 +886,7 @@
   [pred r]
   {:pre [(fn-spec? pred) (reactive? r)]
    :post [(reactive? %)]}
-  (derive-new eventstream "take" [r]
+  (derive-new eventstream "take-while" [r]
               :link-fn
               (fn [{:keys [input-rvts output-reactives] :as input}]
                 (if (apply pred (values input-rvts))
@@ -1112,7 +1112,7 @@
     (on-error *netref* r
               (fn [{:keys [input-rvts]}]
                 (sched/once s millis #(enq netref {:rvt-map (c/into {} (vec input-rvts))
-                                                   :allow-complete #{r}}))
+                                                   :results [{:allow-complete #{r}}]}))
                 {:dont-complete #{r}}))))
 
 
