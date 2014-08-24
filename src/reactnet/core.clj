@@ -6,6 +6,7 @@
 
 ;; TODO
 ;; Fix weakref test
+;; put add / remove-by from stimulus into results
 ;; improve monitoring
 ;; - dynamic monitor creation
 ;; - use own ns
@@ -97,7 +98,8 @@
 ;; A map containing data that is passed to enq/update-and-propagate! to
 ;; start an update/propagation cycle on a network.
 ;;   :results             A seq of Result maps
-;;   :exec                An fn [network & args -> network]
+;;   :exec                A vector containing a function [network & args -> network]
+;;                        and additional args
 ;;   :remove-by           A predicate matching links to remove from the network
 ;;   :add                 A seq of links to add to the network
 ;;   :rvt-map             A map {Reactive -> [v t]} of values to propagate
@@ -484,14 +486,19 @@
 
 (defn ^:no-doc pending-reactives
   "Returns a seq of pending reactives."
-  [{:keys [rid-map links-map]}]
-  (prof-time
-   'pending-reactives
-   (->> rid-map
-        keys
-        (filter pending?)
-        doall)))
+  [{:keys [rid-map]}]
+  (->> rid-map keys (filter pending?)))
 
+
+(defn ^:no-doc completed-reactives
+  "Returns a seq of completed reactives."
+  [{:keys [rid-map]}]
+  (->> rid-map keys (filter completed?)))
+
+
+(defn ^:no-doc dependent-links
+  [{:keys [rid-map links-map]} r]
+  (->> r (get rid-map) (get links-map)))
 
 
 ;; ---------------------------------------------------------------------------
@@ -649,7 +656,7 @@
 (defn- update-from-results
   "Takes a network and a seq of result maps and adds / removes links.
   Returns an updated network."
-  [{:keys [rid-map links-map dont-complete] :as n} completed-rs results]
+  [{:keys [links-map dont-complete] :as n} completed-rs results]
   (prof-time
    'update-from-results
    (let [dont-complete   (->> results
@@ -665,8 +672,7 @@
                                             (dissoc m r))))
                                       dont-complete))
          links-to-remove (->> completed-rs
-                              (map (partial get rid-map))
-                              (mapcat links-map)
+                              (mapcat (partial dependent-links n))
                               set)
          remove-bys      (->> results
                               (map :remove-by)
@@ -753,12 +759,11 @@
 (defn- eval-links
   "Evaluates all links for pending reactives and returns a vector
   [level pending-links link-results]."
-  [{:keys [rid-map links-map level-map] :as n} pending-links pending-reactives]
+  [{:keys [links-map level-map] :as n} pending-links pending-reactives]
   (prof-time
    'eval-links
    (let [links           (->> pending-reactives
-                              (map (partial get rid-map))
-                              (mapcat links-map)
+                              (mapcat (partial dependent-links n))
                               (concat pending-links)
                               (sort-by level-map (comparator <))
                               distinct)
@@ -786,11 +791,11 @@
 (defn- eval-complete-fns!
   "Detects all completed input reactives, calls complete-fn for each
   link and reactive and returns the results."
-  [{:keys [rid-map links links-map] :as n} completed-rs]
+  [{:keys [links links-map] :as n} completed-rs]
   (prof-time
    'eval-complete-fns!
    (let [results  (for [r completed-rs
-                        [l f] (->> r (get rid-map) links-map
+                        [l f] (->> r (dependent-links n)
                                    (map (juxt identity :complete-fn))) :when f]
                     (f l r))]
      (remove nil? results))))
@@ -855,7 +860,7 @@
        (if (seq results)
          (let [unchanged?      (->> results (remove :no-consume) empty?)
                upstream?       (fn [[r _]]
-                                 (let [r-level (level-map (get rid-map r))]
+                                 (let [r-level (->> r (get rid-map) (get level-map))]
                                    (or (nil? r-level) (< r-level level))))
                all-rvts        (mapcat :output-rvts results)
                _               (dump-values "OUTPUTS" all-rvts)
@@ -901,12 +906,12 @@
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [{:keys [rid-map] :as network} {:keys [exec results add remove-by rvt-map]}]
+  [network {:keys [exec results add remove-by rvt-map]}]
   (prof-time
    'update-and-propagate!
    (loop [n   (-> network
                   (apply-exec exec)
-                  (update-from-results (->> rid-map keys (filter completed?))
+                  (update-from-results (completed-reactives network)
                                        (conj results {:add add :remove-by remove-by}))
                   (propagate! add (deliver-values! rvt-map))
                   (propagate-downstream! nil (mapcat :output-rvts results)))

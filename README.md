@@ -350,6 +350,8 @@ with the following entries
                        be removed from the network
   :dont-complete       A seq of reactives that must not be completed
                        automatically
+  :allow-complete      A set of reactives for which to decrease the
+                       dont-complete counter
 ```
 
 This map is the primary means for data exchange between functions
@@ -382,12 +384,12 @@ A map containing data that is passed to enq/update-and-propagate! to
 start an update/propagation cycle of a network.
 
 ```
+  :exec                A vector containing a function [network & args -> network]
+                       and additional args
   :results             A seq of Result maps
   :remove-by           A predicate matching links to remove from the network
   :add                 A seq of links to add to the network
   :rvt-map             A map {Reactive -> [v t]} of values to propagate
-  :allow-complete      A set of reactives for which to decrease the
-                       dont-complete counter
 ```
 
 
@@ -624,7 +626,7 @@ increased for a reactive whenever it is contained in a
 `:dont-complete` seq that the link-function returns as part of the
 result map. All output reactives of the link are listed, if an
 executor is used to execute the link function. The counter for a
-reactive is decreased when a stimulus contains it in the
+reactive is decreased when a result contains it in the
 `:allow-complete` set of reactives.
 
 In addition the network maintains a `:pending-completions` seq that
