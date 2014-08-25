@@ -362,33 +362,31 @@ attached to links and the propagation / update algorithm.
 A map containing the following entries
 
 ```
-  :id                  A string containing an identifier
+  :id                  A string that identifies the network for logging purposes
   :links               Collection of links
-  :rid-map             WeakHashMap {Reactive -> rid} (derived)
-  :next-rid            Atom containing the next rid to assign
+  :rid-map             WeakHashMap {Reactive -> rid}
+                       rid = reactive id (derived)
   :level-map           Map {rid -> topological-level} (derived)
   :links-map           Map {rid -> Seq of links} (derived)
-  :dont-complete       Map {Reactive -> c} of reactives that are not
-                       automatically completed as long as c > 0 
-  :completions         A seq of reactives that will receive ::completed
-                       as soon as they are not contained in the
-					   :dont-complete map
-  :removes             An integer counting how many removes there have
+  :alive-map           Map {rid -> c} of reactives, where c is an integer
+                       which is increased when upon dont-complete and
+                       decrease upon allow-complete. If c becomes 0
+                       the corresponding reactive is auto completed
+  :next-rid            Atom containing the next rid to assign
+  :removes             An integer counting how many link removals happened
                        in order to decide when to rebuild the level-map
 ```
 
 `rid` is a reactive identifier, an integer which is unique within a network.
 
 ### Stimulus
-A map containing data that is passed to enq/update-and-propagate! to
+A map containing data that is passed to enq/update-and-propagate to
 start an update/propagation cycle of a network.
 
 ```
   :exec                A vector containing a function [network & args -> network]
                        and additional args
   :results             A seq of Result maps
-  :remove-by           A predicate matching links to remove from the network
-  :add                 A seq of links to add to the network
   :rvt-map             A map {Reactive -> [v t]} of values to propagate
 ```
 
@@ -403,7 +401,7 @@ propagation/updates to it are enqueued.
     "Enqueue a new update/propagation cycle that will process a seq of
     result maps, remove links, which match the remove-by predicate, add
     new links and propagate the values in the {Reactive -> [v t]} map.
-    An implementation should delegate to update-and-propagate!
+    An implementation should delegate to update-and-propagate
     function.")
   (scheduler [netref]
     "Return the scheduler.")
@@ -568,10 +566,10 @@ TODO Give some more background on
 
 ### The propagation / network update algorithm
 
-The `propagate!` function is the heart of the algorithm, and it works
+The `propagate` function is the heart of the algorithm, and it works
 recursively. The maximum recursion depth corresponds to the
 topological height of the network. It is usually invoked in the form
-of `(propagate! network pending-links [pending-reactives completed-reactives])`.
+of `(propagate network pending-links [pending-reactives completed-reactives])`.
 The arguments are:
 * the network,
 * any links from a prior call to it that weren't evaluated so far,
@@ -600,9 +598,9 @@ Steps:
    for another propagation cycle, they will not be delivered/handled in
    this cycle.
 9. Deliver downstream values contained in results to reactives and
-   recursively invoke `propagate!` for all values.
+   recursively invoke `propagate` for all values.
 
-After `propagate!` exits the outermost invocation a loop starts that
+After `propagate` exits the outermost invocation a loop starts that
 checks if there are still pending reactives. If yes, another
 propagation cycle is started right-away. However, it is possible that
 no link is ready to be evaluated, leading to no new results. In this
@@ -620,18 +618,18 @@ these reactives are immediately allowed to go into the completed state
 since asynchronous / delayed computations started from within
 link-functions could try to push values to these reactives.
 
-Therefore the network maintains a `:dont-complete` map that records
-the number of expected deliveries for each reactive. This counter is
-increased for a reactive whenever it is contained in a
-`:dont-complete` seq that the link-function returns as part of the
-result map. All output reactives of the link are listed, if an
-executor is used to execute the link function. The counter for a
-reactive is decreased when a result contains it in the
-`:allow-complete` set of reactives.
+Therefore the network maintains a map in the `:alive-map` entry which
+assigns a counter to a each reactive. This counter is
+initially 1. Automatic completion decreases it by 1. If a link result
+contains the reactive in a `:dont-complete` entry the counter is
+increased. If a link result contains the reactive in the
+`:allow-complete` entry the counter is decreased. If the counter
+reaches 0 the `::completed` value is pushed to the reactives.
 
-In addition the network maintains a `:pending-completions` seq that
-contains those reactives which are to be completed unless they appear
-in the networks `:dont-complete` map.
+The `:dont-complete` and `:allow-complete` entries are used by link
+functions and the `eval-link` function in case of asynchronous
+execution.
+
 
 ### Backpressure
 

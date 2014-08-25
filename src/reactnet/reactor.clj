@@ -22,7 +22,7 @@
 
 ;; TODOS
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
-
+;; - err-retry --> support "exponential backoff"
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL

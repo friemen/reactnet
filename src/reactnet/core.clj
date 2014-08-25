@@ -5,8 +5,8 @@
            [java.util WeakHashMap]))
 
 ;; TODO
-;; Fix weakref test
-;; put add / remove-by from stimulus into results
+;; fix weakref test
+;; support IDeref of netrefs
 ;; improve monitoring
 ;; - dynamic monitor creation
 ;; - use own ns
@@ -79,29 +79,26 @@
 
 ;; Network:
 ;; A map containing
-;;   :id                  A string containing the fqn of the agent var
+;;   :id                  A string that identifies the network for logging purposes
 ;;   :links               Collection of links
 ;;   :rid-map             WeakHashMap {Reactive -> rid}
 ;;                        rid = reactive id (derived)
-;;   :next-rid            Atom containing the next rid to assign
 ;;   :level-map           Map {rid -> topological-level} (derived)
 ;;   :links-map           Map {rid -> Seq of links} (derived)
-;;   :dont-complete       Map {Reactive -> c} of reactives that are not
-;;                        automatically completed as long as c > 0
-;;   :completions         A seq of reactives that will receive ::completed
-;;                        as soon as they are not contained in the
-;;                        :dont-complete map
-;;   :removes             An integer counting how many removes there have
+;;   :alive-map           Map {rid -> c} of reactives, where c is an integer
+;;                        which is increased when upon dont-complete and
+;;                        decrease upon allow-complete. If c becomes 0
+;;                        the corresponding reactive is auto completed
+;;   :next-rid            Atom containing the next rid to assign
+;;   :removes             An integer counting how many link removals happened
 ;;                        in order to decide when to rebuild the level-map
 
 ;; Stimulus
-;; A map containing data that is passed to enq/update-and-propagate! to
+;; A map containing data that is passed to enq/update-and-propagate to
 ;; start an update/propagation cycle on a network.
 ;;   :results             A seq of Result maps
 ;;   :exec                A vector containing a function [network & args -> network]
 ;;                        and additional args
-;;   :remove-by           A predicate matching links to remove from the network
-;;   :add                 A seq of links to add to the network
 ;;   :rvt-map             A map {Reactive -> [v t]} of values to propagate
 
 ;; NetworkRef:
@@ -117,7 +114,7 @@
 
   Returns the netref.
 
-  An implementation should delegate to update-and-propagate!
+  An implementation should delegate to update-and-propagate
   function.")
   (scheduler [netref]
     "Return the scheduler.")
@@ -146,13 +143,15 @@
   "Returns a pair of vectors, first vector contains the xs for
   which (pred x) returns true, second vector the other xs."
   [pred xs]
-  (let [[txs fxs] (reduce (fn [[txs fxs] x]
-                            (if (pred x)
-                              [(conj! txs x) fxs]
-                              [txs (conj! fxs x)]))
-                          [(transient []) (transient [])]
-                          xs)]
-    [(persistent! txs) (persistent! fxs)]))
+  (if (and (set? pred) (empty? pred))
+    [[] (vec xs)]
+    (let [[txs fxs] (reduce (fn [[txs fxs] x]
+                              (if (pred x)
+                                [(conj! txs x) fxs]
+                                [txs (conj! fxs x)]))
+                            [(transient []) (transient [])]
+                            xs)]
+      [(persistent! txs) (persistent! fxs)])))
 
 
 (defn- any-pred?
@@ -326,7 +325,7 @@
   [id links]
   (rebuild {:id id
             :dont-complete {}
-            :completions nil} links))
+            :next-rid (atom 1)} links))
 
 
 
@@ -362,9 +361,9 @@
                'add-link (atom nil)
                'remove-links (atom nil)
                'pending-reactives (atom nil)
-               'update-and-propagate! (atom nil)
+               'update-and-propagate (atom nil)
                'eval-links (atom nil)
-               'eval-complete-fns! (atom nil)
+               'eval-complete-fns (atom nil)
                'test (atom nil)})
 
 
@@ -497,6 +496,7 @@
 
 
 (defn ^:no-doc dependent-links
+    "Returns links where r is an input of."
   [{:keys [rid-map links-map]} r]
   (->> r (get rid-map) (get links-map)))
 
@@ -505,14 +505,16 @@
 ;; Modifying the network
 
 
-(defn- update-rid-map
+(defn- update-rid-map!
   "Adds input and output reactives to rid-map.
   Returns an updated network."
-  [{:keys [next-rid rid-map] :as n} link]
+  [{:keys [next-rid rid-map ex-rid-map] :as n} link]
   (doseq [r (concat (link-outputs link)
                     (link-inputs link))]
     (when-not (.get rid-map r)
-      (.put rid-map r (swap! next-rid inc))))
+      (let [rid (or (and ex-rid-map (.get ex-rid-map r))
+                    (swap! next-rid inc))]
+        (.put rid-map r rid))))
   n)
 
 
@@ -539,10 +541,10 @@
 
 (defn- add-link
   "Adds a link to the network. Returns an updated network."
-  [{:keys [rid-map links links-map level-map] :as n} l]
+  [{:keys [rid-map links links-map level-map alive-map] :as n} l]
   (prof-time
    'add-link
-   (update-rid-map n l)
+   (update-rid-map! n l)
    (let [input-rids  (->> l link-inputs (map (partial get rid-map)))
          output-rids (->> l link-outputs (map (partial get rid-map)))
          level-map   (reduce (fn [m i]
@@ -560,10 +562,17 @@
                                 (assoc m i (conj lset l))
                                 (assoc m i #{l})))
                             links-map
-                            input-rids)]
+                            input-rids)
+         alive-map  (reduce (fn [m i]
+                              (if-not (get m i)
+                                (assoc m i 1)
+                                m))
+                            alive-map
+                            (concat input-rids output-rids))]
      (assoc n
        :links (conj links l)
        :links-map links-map
+       :alive-map alive-map
        :level-map (adjust-downstream-levels rid-map
                                             links-map
                                             (assoc level-map l link-level)
@@ -575,23 +584,25 @@
   "Takes a network and a set of links and re-calculates rid-map,
   links-map and level-map. Preserves other existing entries. Returns an
   updated network."
-  [{:keys [id] :as n} links]
-  (reduce add-link (assoc n
-                     :rid-map (WeakHashMap.)
-                     :pending-removes 0
-                     :links []
-                     :links-map {}
-                     :level-map {}
-                     :next-rid (atom 1))
-          links))
+  [{:keys [id rid-map] :as n} links]
+  (dissoc (reduce add-link (assoc n
+                             :rid-map (WeakHashMap.)
+                             :ex-rid-map rid-map
+                             :pending-removes 0
+                             :links []
+                             :links-map {}
+                             :level-map {})
+                  links)
+          :ex-rid-map))
 
+(declare auto-complete)
 
 (defn- remove-links
   "Removes links specified by predicate or set.
   Returns an updated network."
   ([n pred]
      (remove-links n pred true))
-  ([{:keys [rid-map links links-map completions pending-removes] :as n} pred completion?]
+  ([{:keys [rid-map links links-map pending-removes] :as n} pred completion?]
      (prof-time
       'remove-links
       (if pred
@@ -616,8 +627,9 @@
                           :pending-removes (+ (count links-to-remove) (or pending-removes 0))
                           :links-map links-map)))]
               (if completion?
-                (assoc n :completions (concat completions
-                                              (mapcat :complete-on-remove links-to-remove)))
+                (auto-complete n (->> links-to-remove
+                                      (mapcat :complete-on-remove)
+                                      (map (fn [r] [r -1]))))
                 n))
             n))
         n))))
@@ -633,15 +645,26 @@
     n))
 
 
-(defn- complete-pending
-  "Asynchronously completes all reactives contained in
-  the :completions set of the network n. Excludes reactives
-  contained in the :dont-complete map. Returns an updated network."
-  [{:keys [completions dont-complete] :as n}]
-  (let [[remaining completables] (dissect dont-complete completions)]
+(defn- auto-complete
+  "Updates networks alive-map and automatically enqueues ::completed
+  for all reactives whose alive counter became 0."
+  [{:keys [rid-map alive-map] :as n} r-diff-pairs]
+  (let [[alive-map
+         completables] (reduce (fn [[m rs] [r diff]]
+                                 (let [rid (get rid-map r)
+                                       c   (get m rid)]
+                                   (if c
+                                     (let [c (+ diff c)]
+                                       (if (> c 0)
+                                         [(assoc m rid c) rs]
+                                         [(dissoc m rid) (conj rs r)]))
+                                     [m rs])))
+                               [alive-map nil]
+                              r-diff-pairs)
+         vt            [::completed (now)]]
     (doseq [r completables]
-      (enq *netref* {:rvt-map {r [::completed (now)]}}))
-    (assoc n :completions remaining)))
+      (enq *netref* {:rvt-map {r vt}}))
+    (assoc n :alive-map alive-map)))
 
 
 (defn- update-links
@@ -656,21 +679,13 @@
 (defn- update-from-results
   "Takes a network and a seq of result maps and adds / removes links.
   Returns an updated network."
-  [{:keys [links-map dont-complete] :as n} completed-rs results]
+  [{:keys [rid-map links-map] :as n} completed-rs results]
   (prof-time
    'update-from-results
-   (let [dont-complete   (->> results
-                              (mapcat (fn [result]
-                                        (concat (->> result :dont-complete
-                                                     (map vector (repeat 1)))
-                                                (->> result :allow-complete
-                                                     (map vector (repeat -1))))))
-                              (reduce (fn [m [diff r]]
-                                        (let [c (max 0 (+ diff (or (get m r) 0)))]
-                                          (if (> c 0)
-                                            (assoc m r c)
-                                            (dissoc m r))))
-                                      dont-complete))
+   (let [r-diff-pairs    (mapcat (fn [result]
+                                   (concat (map vector (:dont-complete result) (repeat 1))
+                                           (map vector (:allow-complete result) (repeat -1))))
+                                 results)
          links-to-remove (->> completed-rs
                               (mapcat (partial dependent-links n))
                               set)
@@ -684,26 +699,25 @@
                            (partial any-pred? preds))
          new-links       (mapcat :add results)]
      (-> n
-         (assoc :dont-complete dont-complete)
-         (update-links remove-by-pred new-links)         
-         complete-pending))))
+         (auto-complete r-diff-pairs)
+         (update-links remove-by-pred new-links)))))
 
 
 (defn- replace-link-error-fn
   "Match links by pred, attach the error-fn and replace the
   link. Returns an updated network."
   [{:keys [links] :as n} pred error-fn]
-  (let [links (->> links
-                   (filter pred)
-                   (map #(assoc % :error-fn error-fn)))]
-    (reduce add-link (remove-links n pred false) links)))
+  (->> links
+       (filter pred)
+       (map #(assoc % :error-fn error-fn))
+       (reduce add-link (remove-links n pred false))))
 
 
 ;; ---------------------------------------------------------------------------
 ;; Propagation within network
 
 
-(defn- handle-exception!
+(defn- handle-exception
   "Invokes the links error-fn function and returns its Result map, or
   prints stacktrace if the link has no error-fn."
   [{:keys [error-fn] :as link} {:keys [exception] :as result}]
@@ -720,7 +734,7 @@
   (let [result        (try (link-fn input)
                            (catch Exception ex {:exception ex
                                                 :dont-complete nil}))
-        error-result  (handle-exception! link (merge input result))]
+        error-result  (handle-exception link (merge input result))]
     (merge input result error-result)))
 
 
@@ -734,7 +748,7 @@
           reactives))
 
 
-(defn- eval-link!
+(defn- eval-link
   "Evaluates one link (possibly using the links executor), returning a Result map."
   [rvt-map {:keys [link-fn level executor] :as link}]
   (let [inputs  (link-inputs link)
@@ -759,18 +773,16 @@
 (defn- eval-links
   "Evaluates all links for pending reactives and returns a vector
   [level pending-links link-results]."
-  [{:keys [links-map level-map] :as n} pending-links pending-reactives]
+  [{:keys [rid-map links-map level-map] :as n} pending-links pending-reactives]
   (prof-time
    'eval-links
-   (let [links           (->> pending-reactives
+   (let [available-links (->> pending-reactives
                               (mapcat (partial dependent-links n))
                               (concat pending-links)
                               (sort-by level-map (comparator <))
-                              distinct)
-         
-         _               (dump-links "CANDIDATES" links)
-         available-links (->> links
+                              (distinct)
                               (filter ready?))]
+     (dump-links "READY" available-links)
      (if (seq available-links)
        (let [level           (or (-> available-links first level-map) 0)             
              same-level?     (fn [l] (= (level-map l) level))
@@ -782,18 +794,18 @@
                                   next-values)
              _               (dump-values "INPUTS" rvt-map)
              link-results    (->> current-links
-                                  (map (partial eval-link! rvt-map))
+                                  (map (partial eval-link rvt-map))
                                   doall)]
          [level pending-links link-results])
        [0 nil nil]))))
 
 
-(defn- eval-complete-fns!
+(defn- eval-complete-fns
   "Detects all completed input reactives, calls complete-fn for each
   link and reactive and returns the results."
-  [{:keys [links links-map] :as n} completed-rs]
+  [{:keys [rid-map links links-map] :as n} completed-rs]
   (prof-time
-   'eval-complete-fns!
+   'eval-complete-fns
    (let [results  (for [r completed-rs
                         [l f] (->> r (dependent-links n)
                                    (map (juxt identity :complete-fn))) :when f]
@@ -830,21 +842,19 @@
     (filter completed? reactives)))
 
 
-(declare propagate-downstream!)
+(declare propagate-downstream)
 
 
-(defn- propagate!
+(defn- propagate
   "Executes one propagation cycle. Returns the network."
   ([network]
-     (propagate! network [] [nil nil]))
+     (propagate network [] [nil nil]))
   ([network pending-reactives]
-     (propagate! network [] [pending-reactives nil]))
-  ([{:keys [rid-map links-map level-map completions dont-complete] :as network}
+     (propagate network [] [pending-reactives nil]))
+  ([{:keys [rid-map links-map level-map dont-complete] :as network}
     pending-links [pending-reactives completed-reactives]]
      (do
        (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
-       (when (seq completions)
-         (dump "  PENDING COMPLETIONS:" (->> completions (map :label) (s/join ", "))))
        (when (seq dont-complete)
          (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
        (when (seq pending-reactives)
@@ -855,7 +865,7 @@
             completed-rs    (->> completed-reactives
                                  (concat (consume-values! link-results))
                                  set)
-            compl-results   (eval-complete-fns! network completed-rs)
+            compl-results   (eval-complete-fns network completed-rs)
             results         (concat link-results compl-results)]
        (if (seq results)
          (let [unchanged?      (->> results (remove :no-consume) empty?)
@@ -867,8 +877,9 @@
                [compl-rvts
                 value-rvts]    (dissect (fn [[_ [v _]]] (= v ::completed)) all-rvts)
                ;; apply network changes returned by link and complete functions
-               network         (update-in (update-from-results network completed-rs results)
-                                          [:completions] concat (map first compl-rvts))
+               network         (-> network
+                                   (auto-complete (map (fn [[r _]] [r -1]) compl-rvts))
+                                   (update-from-results completed-rs results))
                [upstream-rvts
                 downstream-rvts] (dissect upstream? value-rvts)]
            ;; push value into next cycle if reactive level is either
@@ -877,15 +888,15 @@
              (enq *netref* {:rvt-map {r [v t]}}))
            (if unchanged?
              (assoc network :unchanged? true)
-             (propagate-downstream! network
-                                    pending-links
-                                    downstream-rvts)))
+             (propagate-downstream network
+                                   pending-links
+                                   downstream-rvts)))
          (-> network
              (update-from-results completed-rs nil)
              (assoc :unchanged? true))))))
 
 
-(defn- propagate-downstream!
+(defn- propagate-downstream
   "Propagate values to reactives that are guaranteed to be downstream."
   [network pending-links downstream-rvts]
   (loop [n network
@@ -897,31 +908,31 @@
                                            [{} []]
                                            rvts)]
       (if (seq rvt-map)
-        (recur (propagate! n pending-links (deliver-values! rvt-map))
+        (recur (propagate n pending-links (deliver-values! rvt-map))
                remaining-rvts)
         (dissoc n :unchanged?)))))
 
 
-(defn update-and-propagate!
+(defn update-and-propagate
   "Updates network with the contents of the stimulus map,
   delivers any values and runs propagation cycles as link-functions
   return non-empty results.  Returns the network."
-  [network {:keys [exec results add remove-by rvt-map]}]
+  [network {:keys [exec results rvt-map]}]
   (prof-time
-   'update-and-propagate!
-   (loop [n   (-> network
-                  (apply-exec exec)
-                  (update-from-results (completed-reactives network)
-                                       (conj results {:add add :remove-by remove-by}))
-                  (propagate! add (deliver-values! rvt-map))
-                  (propagate-downstream! nil (mapcat :output-rvts results)))
-          prs (pending-reactives n)]
-     (let [next-n      (propagate! n prs)
-           progress?   (not (:unchanged? next-n))
-           next-prs    (pending-reactives next-n)]
-       (if (and progress? (seq next-prs))
-         (recur next-n next-prs)
-         next-n)))))
+   'update-and-propagate
+   (let [new-links (mapcat :add results)]
+     (loop [n   (-> network
+                    (apply-exec exec)
+                    (update-from-results (completed-reactives network) results)
+                    (propagate new-links (deliver-values! rvt-map))
+                    (propagate-downstream nil (mapcat :output-rvts results)))
+            prs (pending-reactives n)]
+       (let [next-n      (propagate n prs)
+             progress?   (not (:unchanged? next-n))
+             next-prs    (pending-reactives next-n)]
+         (if (and progress? (seq next-prs))
+           (recur next-n next-prs)
+           next-n))))))
 
 
 ;; ---------------------------------------------------------------------------
@@ -955,13 +966,13 @@
 (defn add-links!
   "Adds links to the network. Returns the network ref."
   [netref & links]
-  (enq netref {:add links}))
+  (enq netref {:results [{:add links}]}))
 
 
 (defn remove-links!
   "Removes links from the network. Returns the network ref."
   [netref pred]
-  (enq netref {:remove-by pred}))
+  (enq netref {:results [{:remove-by pred}]}))
 
 
 (defn on-error

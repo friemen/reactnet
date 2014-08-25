@@ -1,6 +1,6 @@
 (ns reactnet.netrefs
   "Default INetworkRef implementations: Agent and Atom based."
-  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate! pending?]]
+  (:require [reactnet.core :refer [INetworkRef *netref* update-and-propagate pending?]]
             [reactnet.scheduler :as sched]))
 
 
@@ -18,7 +18,7 @@
                                             (->> stimulus :rvt-map keys (map :label)))))))
     (send-off n-agent (fn [n]
                         (binding [*netref* this]
-                          (let [n (update-and-propagate! n stimulus)]
+                          (let [n (update-and-propagate n stimulus)]
                             (when (agent-error n-agent)
                               (println (agent-error n-agent)))
                             n))))
@@ -42,7 +42,7 @@
   (enq [this stimulus]
     (binding [*netref* this]
       (swap! n-atom (fn [n]
-                      (update-and-propagate! n stimulus)))
+                      (update-and-propagate n stimulus)))
       this))
   (scheduler [this]
     sched)
