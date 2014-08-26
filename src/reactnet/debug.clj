@@ -1,5 +1,6 @@
 (ns reactnet.debug
-  "Logging debug data to an internal agent.")
+  "Logging debug data to an internal agent."
+  (:require [clojure.java.io :as io]))
 
 
 (def ^:no-doc log? false)
@@ -24,18 +25,38 @@
   nil)
 
 
-(defn dump
-  "Prints log contents to console."
+(defn lines
+  "Returns a seq of strings of the log agents content."
   ([]
-     (dump (constantly true)))
+     (lines (constantly true)))
   ([pred]
      (let [basetime (some-> @log-agent first :time)]
-       (doseq [entry (->> @log-agent
+       (for [entry (->> @log-agent
                           (filter pred)
                           (sort-by :time))
                :let [t (Math/round (/ (- (:time entry) basetime) 1e6))]]
-         
-         (println (format "%6d" t) "-" (dissoc entry :time))))))
+         (print-str (format "%6d" t) (format "%-10s" (:type entry)) "-" (dissoc entry :type :time))))))
+
+
+(defn to-console
+  "Writes lines to console."
+  ([lines]
+     (to-console 50 lines))
+  ([max lines]
+     (doseq [l (take max lines)]
+       (println l))
+     (when (> (count lines) max)
+       (println (- (count lines) max) "more lines available"))))
+
+
+(defn to-file
+  ([lines]
+     (to-file "/tmp/reactnet.log" lines))
+  ([file lines]
+     (with-open [w (io/writer file)]
+       (doseq [l lines]
+         (.write w l)
+         (.write w "\n")))))
 
 
 (defmacro log
@@ -45,5 +66,12 @@
          (send log-agent conj (assoc (if (map? ~x) ~x {:data ~x})
                                 :time (System/nanoTime))))
       ~x))
+
+
+(defn ^:no-doc matches-reactive
+  [label]
+  (fn [x]
+    (or (= (:r x) label)
+        (seq (filter #(= % label) (concat (:inputs x) (:outputs x)))))))
 
 

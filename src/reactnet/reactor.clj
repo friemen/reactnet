@@ -498,6 +498,7 @@
                                {:output-rvts (single-value [old new] (first output-reactives))}
                                {}))))))
 
+(declare flatmap)
 
 (defn concat
   "Returns an eventstream that emits the items of all reactives in
@@ -506,11 +507,7 @@
   [& rs]
   {:pre [(every? reactive? rs)]
    :post [(reactive? %)]}
-  (let [new-r   (eventstream :label (unique-name "concat"))
-        state   (atom (make-reactive-queue new-r (c/concat rs [new-r])))
-        link    (-> (c/swap! state switch-reactive state) :add first)]
-    (add-links! *netref* link)
-    new-r))
+  (flatmap identity (seqstream rs)))
 
 
 (defn count
@@ -916,7 +913,6 @@
                                                                 ::rn/completed]
                                                              (first output-reactives))
                                   :remove-by #(= (link-outputs %) output-reactives)})))]
-    ;; :remove-by #(= (link-outputs %) output-reactives)
     (when (= 0 n)
       (complete! new-r))
     new-r))
@@ -1141,6 +1137,7 @@
   (on-error *netref* r
             (fn [{:keys [input-reactives]}]
               {:remove-by #(= (link-outputs %) [r])
+               :dont-complete #{r}
                :add [(make-link "err" [r-after-error] [r]
                                 :link-fn default-link-fn)]})))
 

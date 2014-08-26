@@ -3,7 +3,8 @@
             [reactnet.core :as rn]
             [reactnet.netrefs :as refs]
             [reactnet.reactives :refer [behavior eventstream seqstream]]
-            [reactnet.executors])
+            [reactnet.executors]
+            [reactnet.debug :as dbg])
   (:import [reactnet.core IExecutor]))
 
 
@@ -332,7 +333,7 @@
                                     (if (or (nil? active) (rn/completed? active))
                                       {:queue (vec (rest queue))
                                        :active r
-                                       :add [(rn/make-link "" [r] [e2]
+                                       :add [(rn/make-link "temp" [r] [e2]
                                                            :complete-fn
                                                            (fn [_ r]
                                                              (merge (swap! q-atom switch)
@@ -347,7 +348,7 @@
                    (link (partial swap! r conj) [e2] [])]
       (apply push! (cons e1 ranges))
       (is (= expected @r))
-      (is (= 3 (-> rn/*netref* rn/network :links count))))))
+      (is (= 4 (-> rn/*netref* rn/network :links count))))))
 
 
 (deftest async-exec-test

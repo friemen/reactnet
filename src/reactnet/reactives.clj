@@ -54,7 +54,8 @@
     (:last-occ (swap! a (fn [{:keys [queue] :as a}]
                           (when (empty? queue)
                             (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
-                          (dbg/log {:type "consume" :r (:label this) :v (ffirst queue)})
+                          (dbg/log {:type "consume" :r (:label this) :v (ffirst queue)
+                                    :completed (and (:completed a) (<= (count queue) 1))})
                           (assoc a
                             :last-occ (first queue)
                             :queue (pop queue))))))

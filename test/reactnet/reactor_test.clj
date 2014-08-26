@@ -3,7 +3,8 @@
             [reactnet.reactor :as r]
             [reactnet.netrefs :as refs]
             [reactnet.scheduler :as sched]
-            [reactnet.core :as rn :refer [push! complete! pp]]))
+            [reactnet.core :as rn :refer [push! complete! pp]]
+            [reactnet.debug :as dbg]))
 
 
 ;; ---------------------------------------------------------------------------
