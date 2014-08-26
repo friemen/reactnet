@@ -1,6 +1,7 @@
 (ns reactnet.reactives
   "Default IReactive implementations: Behavior, Eventstream and Seqstream."
-  (:require [reactnet.core :as rn])
+  (:require [reactnet.core :as rn]
+            [reactnet.debug :as dbg])
   (:import [reactnet.core IReactive]))
 
 ;; ---------------------------------------------------------------------------
@@ -19,15 +20,15 @@
     (not @live?))
   (consume! [this]
     (reset! new? false)
-    (rn/dump "CONSUME!" (first @a) "<-" (:label this))
+    (dbg/log {:type "consume" :r (:label this) :v (first @a)})
     @a)
   (deliver! [this [value timestamp]]
     (when-not @live?
       (throw (IllegalStateException. (str "Behavior '" label "' is completed"))))
-    (if (= :reactnet.core/completed value)
+    (if (= ::rn/completed value)
       (reset! live? false)
       (when (not= (first @a) value)
-        (rn/dump "DELIVER!" (:label this) "<-" value)
+        (dbg/log {:type "deliver" :r (:label this) :v value})
         (reset! a [value timestamp])
         (reset! new? true))))
   clojure.lang.IDeref
@@ -53,21 +54,21 @@
     (:last-occ (swap! a (fn [{:keys [queue] :as a}]
                           (when (empty? queue)
                             (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
-                          (rn/dump "CONSUME!" (ffirst queue) "<-" (:label this))
+                          (dbg/log {:type "consume" :r (:label this) :v (ffirst queue)})
                           (assoc a
                             :last-occ (first queue)
                             :queue (pop queue))))))
   (deliver! [this value-timestamp]
-    (let [will-complete (= (first value-timestamp) :reactnet.core/completed)]
+    (let [will-complete (= (first value-timestamp) ::rn/completed)]
       (seq (:queue (swap! a (fn [{:keys [completed queue] :as a}]
                               (if completed
                                 a
                                 (if will-complete
-                                  (do (rn/dump "WILL COMPLETE" (:label this))
+                                  (do (dbg/log {:type "deliver" :r (:label this) :v ::rn/completed})
                                       (assoc a :completed true))
                                   (if (<= n (count queue))
                                     (throw (IllegalStateException. (str "Cannot add more than " n " items to stream '" label "'")))
-                                    (do (rn/dump "DELIVER!" (:label this) "<-" (first value-timestamp))
+                                    (do (dbg/log {:type "deliver" :r (:label this) :v (first value-timestamp)})
                                         (assoc a :queue (conj queue value-timestamp))))))))))))
   clojure.lang.IDeref
   (deref [this]

@@ -240,6 +240,8 @@
       :output output}))
 
 
+(def balance (atom 0))
+
 (defn- switch-reactive
   [{:keys [queue input output] :as queue-state} q-atom]
   (let [r           (first queue)
@@ -252,6 +254,7 @@
        :add    [(make-link "temp" [r] [output]
                            :complete-fn
                            (fn [_ r]
+                             (c/swap! balance dec)
                              (c/merge (c/swap! q-atom switch-reactive q-atom)
                                       {:remove-by #(= [r] (link-inputs %))
                                        :allow-complete #{output}})))]}
@@ -264,7 +267,7 @@
 (defn- enqueue-reactive
   [queue-state q-atom r]
   (assoc (switch-reactive (update-in queue-state [:queue] conj r) q-atom)
-    :dont-complete #{(:output queue-state)}))
+    :dont-complete (do (c/swap! balance inc) #{(:output queue-state)})))
 
 
 ;; ---------------------------------------------------------------------------
@@ -720,8 +723,9 @@
                                 (if v
                                   {:output-rvts (single-value match-value (first output-reactives))
                                    :remove-by #(= output-reactives (link-outputs %))})))
-                :complete-fn (fn [l r]
-                               {:output-rvts (single-value default-value (-> l link-outputs first))})))))
+                :complete-fn
+                (fn [l r]
+                  {:output-rvts (single-value default-value (-> l link-outputs first))})))))
 
 
 (defn merge
@@ -733,9 +737,10 @@
   (let [new-r   (eventstream :label (unique-name "merge"))
         inputs  (atom (set rs))
         links   (->> rs (c/map #(make-link "merge" [%] [new-r]
-                                           :complete-fn (fn [l r]
-                                                          (when-not (seq (c/swap! inputs disj r))
-                                                            (complete! new-r))))))]
+                                           :complete-fn
+                                           (fn [l r]
+                                             (if-not (seq (c/swap! inputs disj r))
+                                               {:output-rvts (single-value ::rn/completed new-r)})))))]
     (if (seq links)
       (apply (partial add-links! *netref*) links)
       (complete! new-r))
@@ -908,9 +913,10 @@
                                  {:output-rvts (single-value (fvalue input-rvts)
                                                              (first output-reactives))}
                                  {:output-rvts (enqueue-values [(fvalue input-rvts)
-                                                                :reactnet.core/completed]
-                                                               (first output-reactives))
+                                                                ::rn/completed]
+                                                             (first output-reactives))
                                   :remove-by #(= (link-outputs %) output-reactives)})))]
+    ;; :remove-by #(= (link-outputs %) output-reactives)
     (when (= 0 n)
       (complete! new-r))
     new-r))

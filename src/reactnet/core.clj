@@ -1,6 +1,7 @@
 (ns reactnet.core
   "Implementation of a propagation network."
-  (:require [clojure.string :as s])
+  (:require [clojure.string :as s]
+            [reactnet.debug :as dbg])
   (:import [java.lang.ref WeakReference]
            [java.util WeakHashMap]))
 
@@ -428,31 +429,31 @@
   (str (:label r) ": [" (->> vs (map first) (s/join ", ")) "]"))
 
 
-(def ^:no-doc debug? false)
+;; ---------------------------------------------------------------------------
+;; Debug logging
 
-(defmacro ^:no-doc dump
-  [& args]
-  `(when debug?
-     (println ~@args)))
-
-
-(defn ^:no-doc dump-links
-  [label links]
-  (if (seq links)
-    (do
-      (dump "-" label (apply str (repeat (- 57 (count label)) \-)))
-      (dump (->> links (map str-link) (s/join "\n")))
-      (dump (apply str (repeat 60 \-))))
-    (dump "-" label "- No links")))
+(defn ^:no-doc log-text
+  [type & xs]
+  (dbg/log {:type type
+            :text (apply print-str xs)}))
 
 
-(defn ^:no-doc dump-values
-  [label rvts]
-  (if (seq rvts)
-    (dump label (->> rvts
-                     (map (fn [[r [v t]]]
-                            (str (:label r) " " v)))
-                     (s/join ", ")))))
+(defn ^:no-doc log-links
+  [type links]
+  (doseq [l links]
+    (dbg/log {:type type
+              :l (:label l)
+              :inputs (map :label (link-inputs l))
+              :outputs (map :label (link-outputs l))})))
+
+
+(defn ^:no-doc log-rvts
+  [type rvts]
+  (doseq [[r [v t]] rvts]
+    (dbg/log {:type type
+             :r (:label r)
+             :v v
+             :t t})))
 
 
 ;; ---------------------------------------------------------------------------
@@ -486,7 +487,7 @@
 (defn ^:no-doc pending-reactives
   "Returns a seq of pending reactives."
   [{:keys [rid-map]}]
-  (->> rid-map keys (filter pending?)))
+  (prof-time 'pending-reactives (->> rid-map keys (filter pending?) doall)))
 
 
 (defn ^:no-doc completed-reactives
@@ -609,7 +610,7 @@
         (let [[links-to-remove
                remaining-links] (dissect pred links)]
           (if (seq links-to-remove)
-            (let [_ (dump-links "REMOVE" links-to-remove)
+            (let [_ (log-links "remove" links-to-remove)
                   n (if (> (or pending-removes 0) 100)
                       (rebuild n remaining-links)
                       (let [input-rids (->> links-to-remove
@@ -647,7 +648,7 @@
 
 (defn- auto-complete
   "Updates networks alive-map and automatically enqueues ::completed
-  for all reactives whose alive counter became 0."
+  for all reactives whose alive counter became 0. Returns an updated network."
   [{:keys [rid-map alive-map] :as n} r-diff-pairs]
   (let [[alive-map
          completables] (reduce (fn [[m rs] [r diff]]
@@ -664,6 +665,9 @@
          vt            [::completed (now)]]
     (doseq [r completables]
       (enq *netref* {:rvt-map {r vt}}))
+    #_(doseq [r completables]
+      (swap! completions inc)
+      (deliver! r vt))
     (assoc n :alive-map alive-map)))
 
 
@@ -672,7 +676,7 @@
   new-links to the networks links. Returns an updated network."
   [n remove-by-pred new-links]
   (when (seq new-links)
-    (dump-links "ADD" new-links))
+    (log-links "add" new-links))
   (reduce add-link (remove-links n remove-by-pred) new-links))
 
 
@@ -699,8 +703,8 @@
                            (partial any-pred? preds))
          new-links       (mapcat :add results)]
      (-> n
-         (auto-complete r-diff-pairs)
-         (update-links remove-by-pred new-links)))))
+         (update-links remove-by-pred new-links)
+         (auto-complete r-diff-pairs)))))
 
 
 (defn- replace-link-error-fn
@@ -782,7 +786,7 @@
                               (sort-by level-map (comparator <))
                               (distinct)
                               (filter ready?))]
-     (dump-links "READY" available-links)
+     (log-links "available" available-links)
      (if (seq available-links)
        (let [level           (or (-> available-links first level-map) 0)             
              same-level?     (fn [l] (= (level-map l) level))
@@ -792,7 +796,7 @@
                                   (mapcat link-inputs)
                                   distinct
                                   next-values)
-             _               (dump-values "INPUTS" rvt-map)
+             _               (log-rvts "inputs" rvt-map)
              link-results    (->> current-links
                                   (map (partial eval-link rvt-map))
                                   doall)]
@@ -801,7 +805,7 @@
 
 
 (defn- eval-complete-fns
-  "Detects all completed input reactives, calls complete-fn for each
+  "Takes completed input reactives, calls complete-fn for each
   link and reactive and returns the results."
   [{:keys [rid-map links links-map] :as n} completed-rs]
   (prof-time
@@ -820,7 +824,7 @@
   (doseq [[r vt] rvt-map]
     (if (completed? r)
       (when (not= (first vt) ::completed)
-        (dump "WARNING: trying to deliver" vt "into completed" r))
+        (log-text "warning" "Trying to deliver" vt "into completed" r))
       (try (deliver! r vt)
            (catch IllegalStateException ex
              (enq *netref* {:rvt-map {r vt}})))))
@@ -851,14 +855,10 @@
      (propagate network [] [nil nil]))
   ([network pending-reactives]
      (propagate network [] [pending-reactives nil]))
-  ([{:keys [rid-map links-map level-map dont-complete] :as network}
+  ([{:keys [rid-map links-map level-map] :as network}
     pending-links [pending-reactives completed-reactives]]
      (do
-       (dump "\n= PROPAGATE" (:id network) (apply str (repeat (- 47 (count (:id network))) "=")))
-       (when (seq dont-complete)
-         (dump "  PENDING EVALS:" (->> dont-complete (map (fn [[r c]] (str (:label r) " " c))) (s/join ", "))))
-       (when (seq pending-reactives)
-         (dump "  PENDING REACTIVES:" (->> pending-reactives (map :label) (s/join ", ")))))
+       (dbg/log {:type "propagate" :id (:id network)}))
      (let [[level
             pending-links
             link-results]   (eval-links network pending-links pending-reactives)
@@ -873,13 +873,13 @@
                                  (let [r-level (->> r (get rid-map) (get level-map))]
                                    (or (nil? r-level) (< r-level level))))
                all-rvts        (mapcat :output-rvts results)
-               _               (dump-values "OUTPUTS" all-rvts)
+               _               (log-rvts "outputs" all-rvts)
                [compl-rvts
                 value-rvts]    (dissect (fn [[_ [v _]]] (= v ::completed)) all-rvts)
                ;; apply network changes returned by link and complete functions
                network         (-> network
-                                   (auto-complete (map (fn [[r _]] [r -1]) compl-rvts))
-                                   (update-from-results completed-rs results))
+                                   (update-from-results completed-rs results)
+                                   (auto-complete (map (fn [[r _]] [r -1]) compl-rvts)))
                [upstream-rvts
                 downstream-rvts] (dissect upstream? value-rvts)]
            ;; push value into next cycle if reactive level is either
@@ -920,10 +920,13 @@
   [network {:keys [exec results rvt-map]}]
   (prof-time
    'update-and-propagate
-   (let [new-links (mapcat :add results)]
+   (let [new-links      (mapcat :add results)
+         completed-rs   (completed-reactives network)
+         #_compl-results  #_(eval-complete-fns network completed-rs)
+         #_results        #_(concat results compl-results)]
      (loop [n   (-> network
                     (apply-exec exec)
-                    (update-from-results (completed-reactives network) results)
+                    (update-from-results completed-rs results)
                     (propagate new-links (deliver-values! rvt-map))
                     (propagate-downstream nil (mapcat :output-rvts results)))
             prs (pending-reactives n)]
