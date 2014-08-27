@@ -8,6 +8,7 @@
             [reactnet.scheduler :as sched]
             [reactnet.reactives]
             [reactnet.executors]
+            [reactnet.debug :as dbg]
             [reactnet.core :as rn
              :refer [add-links! broadcast-value completed? default-link-fn
                      enq enqueue-values execute fvalue link-inputs
@@ -240,8 +241,6 @@
       :output output}))
 
 
-(def balance (atom 0))
-
 (defn- switch-reactive
   [{:keys [queue input output] :as queue-state} q-atom]
   (let [r           (first queue)
@@ -253,8 +252,8 @@
        :input  r
        :add    [(make-link "temp" [r] [output]
                            :complete-fn
-                           (fn [_ r]
-                             (c/swap! balance dec)
+                           (fn [l r]
+                             (dbg/log {:type "compl-fn" :l (:label l) :rs [(:label r) (:label output)]})
                              (c/merge (c/swap! q-atom switch-reactive q-atom)
                                       {:remove-by #(= [r] (link-inputs %))
                                        :allow-complete #{output}})))]}
@@ -267,7 +266,7 @@
 (defn- enqueue-reactive
   [queue-state q-atom r]
   (assoc (switch-reactive (update-in queue-state [:queue] conj r) q-atom)
-    :dont-complete (do (c/swap! balance inc) #{(:output queue-state)})))
+    :dont-complete (do (dbg/log {:type "enqueue" :rs [(:label r) (-> queue-state :output :label)]}) #{(:output queue-state)})))
 
 
 ;; ---------------------------------------------------------------------------

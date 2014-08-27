@@ -7,6 +7,10 @@
             [reactnet.debug :as dbg]))
 
 
+#_(do (dbg/on) (dbg/clear)
+      (with-clean-network -test)
+      (dbg/to-console (dbg/lines)))
+
 ;; ---------------------------------------------------------------------------
 ;; Support functions
 

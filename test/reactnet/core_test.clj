@@ -348,7 +348,7 @@
                    (link (partial swap! r conj) [e2] [])]
       (apply push! (cons e1 ranges))
       (is (= expected @r))
-      (is (= 4 (-> rn/*netref* rn/network :links count))))))
+      (is (= 3 (-> rn/*netref* rn/network :links count))))))
 
 
 (deftest async-exec-test

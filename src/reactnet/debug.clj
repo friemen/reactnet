@@ -68,10 +68,22 @@
       ~x))
 
 
+(defn log-pass-first
+  [x logf]
+  (log (logf x))
+  x)
+
+
+(defn log-pass-last
+  [logf x]
+  (log (logf x))
+  x)
+
+
 (defn ^:no-doc matches-reactive
   [label]
   (fn [x]
     (or (= (:r x) label)
-        (seq (filter #(= % label) (concat (:inputs x) (:outputs x)))))))
+        (seq (filter #(= % label) (concat (:inputs x) (:outputs x) (:rs x)))))))
 
 
