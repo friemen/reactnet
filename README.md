@@ -563,6 +563,7 @@ TODO Give some more background on
 
 * Topological levels
 * Monitoring
+* Debugging
 * WeakHashMap / WeakReferences for outputs
 
 

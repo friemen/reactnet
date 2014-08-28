@@ -119,7 +119,7 @@
   (network [netref]
     "Return the network map.")
   (monitors [netref]
-    "Return the map containing monitors."))
+    "Return the monitors map."))
 
 
 

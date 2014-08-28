@@ -7,6 +7,6 @@
   :plugins [[codox "0.8.10"]]
   :codox {:defaults {}
           :sources ["src"]
-          :exclude [reactnet.example reactnet.ex-swing reactnet.ex-services]
+          :exclude [reactnet.example reactnet.ex-swing reactnet.ex-reactor reactnet.ex-services]
           :src-dir-uri "https://github.com/friemen/reactnet/blob/master/"
           :src-linenum-anchor-prefix "L"})

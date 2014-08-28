@@ -1095,7 +1095,7 @@
 
 (defn err-ignore
   "Attaches an exception-handler to the function calculating the items for r.
-  Quietly ignores any exception, and does not even print a stacktrace..
+  Quietly ignores any exception, and does not even print a stacktrace.
   Returns r."
   [r]
   (on-error *netref* r
