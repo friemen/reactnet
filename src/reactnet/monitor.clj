@@ -1,7 +1,7 @@
 (ns reactnet.monitor
   "Functions for monitoring number/time values.")
 
-(defn add-duration
+(defn ^:no-doc add-duration
   [a start stop]
   (swap! a (fn [{:keys [n nanos] :as m}]
              (let [nanos (+ (or nanos 0) (- stop start))
@@ -13,7 +13,7 @@
                  :nanos nanos)))))
 
 
-(defn add-number
+(defn ^:no-doc add-number
   [a v]
   (swap! a (fn [{:keys [n sum max min avg] :as m}]
              (let [new-n   (inc (or n 0))
@@ -27,10 +27,13 @@
                  :avg (float (/ new-sum new-n)))))))
 
 
-(def ^:no-doc profile? true)
+(def ^{:doc "Activates collection of values if set to true."} profile? true)
 
 
-(defmacro ^:no-doc duration
+(defmacro duration
+  "Execute the expressions and measure the duration. 
+  Updates the monitor specfied by key.
+  Returns the result of exprs evaluation."
   [monitors key & exprs]
   `(if profile?
      (let [start# (System/nanoTime)
@@ -41,19 +44,23 @@
      (do ~@exprs)))
 
 
-(defmacro ^:no-doc number
+(defmacro number
+  "Takes the number v and adds it ti the sum in the monitor specified by key.
+  Returns the monitor map or nil (if profile? is false)."
   [monitors key v]
   `(when profile?
      (add-number (get ~monitors ~key) ~v)))
 
 
 (defn print-all
+  "Printlns all monitors contained in the monitors map."
   [monitors]
   (doseq [[s a] (sort-by first monitors)]
     (println s @a)))
 
 
 (defn reset-all!
+  "Sets all monitor atoms in the monitors map to nil."
   [monitors]
   (doseq [[k a] monitors]
     (reset! a nil)))

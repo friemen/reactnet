@@ -84,8 +84,8 @@
 ;;   :level-map           Map {rid -> topological-level} (derived)
 ;;   :links-map           Map {rid -> Seq of links} (derived)
 ;;   :alive-map           Map {rid -> c} of reactives, where c is an integer
-;;                        which is increased when upon dont-complete and
-;;                        decrease upon allow-complete. If c becomes 0
+;;                        which is increased upon dont-complete and
+;;                        decreased upon allow-complete. If c becomes 0
 ;;                        the corresponding reactive is auto completed
 ;;   :next-rid            Atom containing the next rid to assign
 ;;   :removes             An integer counting how many link removals happened
@@ -124,6 +124,7 @@
 
 
 (def ^:dynamic *netref* "A reference to a current thread-local network." nil)
+(def rebuild-threshold "The number of removed links before a rebuild is due." 100)
 
 
 ;; Executor
@@ -548,7 +549,7 @@
 
 (defn- rebuild-if-necessary
   [{:keys [removes links] :as n}]
-  (if (> (or removes 0) 100)
+  (if (> (or removes 0) rebuild-threshold)
     (rebuild n links)
     n))
 

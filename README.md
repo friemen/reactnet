@@ -30,8 +30,8 @@ Key ideas of reactnet are:
 
 ## Introduction
 
-This library is a low-level tool for creating combinators that are
-inspired by [FRP](http://en.wikipedia.org/wiki/Functional_reactive_programming).
+This library is a low-level tool for creating combinators that support
+[reactive programming](http://en.wikipedia.org/wiki/Reactive_programming).
 
 To illustrate how reactnet can be used we take three steps:
 * Provide functions that conveniently create links.
@@ -52,7 +52,7 @@ A *link* connects input with output reactives through a
 called upon completion of any input reactive and some other
 settings.
 
-Defining links is the crucial part. This is what the common FRP
+Defining links is the crucial part. This is what well-known
 combinators like `map`, `filter`, `switch` etc. are all about: they
 add or remove links to a network.
 
@@ -269,8 +269,12 @@ foundation of this library.
 ### Reactive
 
 A reactive is something that takes and provides values, basically a
-generalization of classical FRP concepts *behavior* and
-*events(tream)*. The following protocol shows the functions that the
+generalization of the concepts *Behavior* and
+*Events(tream)*. Behaviors in the sense of reactnet are like
+variables that know if their value has recently changed. They can
+always provide the current value. This is the main difference to
+Eventstreams which can be seen as sequences of value/timestamp
+pairs. The following protocol shows the functions that the
 propagation algorithm interacts with:
 
 ```clojure
@@ -369,8 +373,8 @@ A map containing the following entries
   :level-map           Map {rid -> topological-level} (derived)
   :links-map           Map {rid -> Seq of links} (derived)
   :alive-map           Map {rid -> c} of reactives, where c is an integer
-                       which is increased when upon dont-complete and
-                       decrease upon allow-complete. If c becomes 0
+                       which is increased upon dont-complete and
+                       decreased upon allow-complete. If c becomes 0
                        the corresponding reactive is auto completed
   :next-rid            Atom containing the next rid to assign
   :removes             An integer counting how many link removals happened
@@ -423,7 +427,7 @@ the value of the netref arg.
 
 ## Creating links
 
-A network is made up of links. Most FRP-style combinators are
+A network is made up of links. Most combinators are
 essentially factories that create new reactives and link them via
 specific functionality to other reactives. For any link you must
 decide

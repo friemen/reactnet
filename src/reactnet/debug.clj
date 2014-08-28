@@ -50,6 +50,7 @@
 
 
 (defn to-file
+  "Outputs the lines to a file."
   ([lines]
      (to-file "/tmp/reactnet.log" lines))
   ([file lines]
@@ -69,18 +70,24 @@
 
 
 (defn log-pass-first
+  "Logs the result of (logf x) and returns x.
+  Can be used in -> expressions."
   [x logf]
   (log (logf x))
   x)
 
 
 (defn log-pass-last
+  "Logs the result of (logf x) and returns x.
+  Can be used in ->> expressions."
   [logf x]
   (log (logf x))
   x)
 
 
-(defn ^:no-doc matches-reactive
+(defn matches-reactive
+  "Returns a predicate that returns true when the reactives label turns up
+  in :r, :inputs, :outputs, :rs entries of a debug line map."
   [label]
   (fn [x]
     (or (= (:r x) label)
