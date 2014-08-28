@@ -51,14 +51,15 @@
   (completed? [this]
     (and (:completed @a) (empty? (:queue @a))))
   (consume! [this]
-    (:last-occ (swap! a (fn [{:keys [queue] :as a}]
-                          (when (empty? queue)
-                            (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
-                          (dbg/log {:type "consume" :r (:label this) :v (ffirst queue)
-                                    :completed (and (:completed a) (<= (count queue) 1))})
-                          (assoc a
-                            :last-occ (first queue)
-                            :queue (pop queue))))))
+    (let [occ (:last-occ (swap! a (fn [{:keys [queue] :as a}]
+                                    (when (empty? queue)
+                                      (throw (IllegalStateException. (str "Eventstream '" label "' is empty"))))
+                                (assoc a
+                                  :last-occ (first queue)
+                                  :queue (pop queue)))))]
+      (dbg/log {:type "consume" :r (:label this) :v (first occ)
+                :completed (rn/completed? this)})
+      occ))
   (deliver! [this value-timestamp]
     (let [will-complete (= (first value-timestamp) ::rn/completed)]
       (seq (:queue (swap! a (fn [{:keys [completed queue] :as a}]
@@ -92,11 +93,14 @@
   (completed? [this]
     (-> seq-val-atom deref :seq nil?))
   (consume! [this]
-    (:last-occ (swap! seq-val-atom (fn [{:keys [seq]}]
-                                     (if-let [v (first seq)]
-                                       {:seq (next seq)
-                                        :last-occ [v (rn/now)]}
-                                       (throw (IllegalStateException. (str "Seqstream is empty"))))))))
+    (let [occ (:last-occ (swap! seq-val-atom (fn [{:keys [seq]}]
+                                               (if-let [v (first seq)]
+                                                 {:seq (next seq)
+                                                  :last-occ [v (rn/now)]}
+                                                 (throw (IllegalStateException. (str "Seqstream is empty")))))))]
+      (dbg/log {:type "consume" :r (:label this) :v (first occ)
+                :completed (rn/completed? this)})
+      occ))
   (deliver! [r value-timestamp-pair]
     (throw (UnsupportedOperationException. "Unable to deliver a value to a seq")))
   clojure.lang.IDeref

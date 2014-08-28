@@ -348,10 +348,10 @@ with the following entries
   :add                 A seq of links to be added to the network
   :remove-by           An unary predicate that matches links to
                        be removed from the network
-  :dont-complete       A seq of reactives that must not be completed
-                       automatically
-  :allow-complete      A set of reactives for which to decrease the
-                       dont-complete counter
+  :dont-complete       A seq of reactives for which to increase the
+	                   alive counter
+  :allow-complete      A seq of reactives for which to decrease the
+                       alive counter
 ```
 
 This map is the primary means for data exchange between functions
@@ -482,12 +482,14 @@ The link-function can add the following entries
   :output-rvts         A seq of RVTs that will get delivered 
   :no-consume          True if the preceding link evaluation
                        does not cause consumption of the input
-  :dont-complete       A seq of reactives that must not be completed
-                       automatically
   :exception           Exception, or nil if output-rvts is valid
   :add                 A seq of links to be added to the network
   :remove-by           An unary predicate that matches links to be
                        removed from the network
+  :dont-complete       A seq of reactives for which to increase the
+	                   alive counter
+  :allow-complete      A seq of reactives for which to decrease the
+                       alive counter
 ```
 
 Essentially the link-function tells the algorithm
@@ -568,7 +570,7 @@ TODO Give some more background on
 
 The `propagate` function is the heart of the algorithm, and it works
 recursively. The maximum recursion depth corresponds to the
-topological height of the network. It is usually invoked in the form
+topological height of the network. It is invoked in the form
 of `(propagate network pending-links [pending-reactives completed-reactives])`.
 The arguments are:
 * the network,
@@ -610,13 +612,13 @@ case the loop is terminated.
 ### Automatic link removal and completion
 
 A link with at least one completed input or only completed outputs is
-useless. It's called *dead* and will automatically be removed in
-`(update-from-results network results)`. Links point via
-`:complete-on-remove` key to those reactives that will not receive any
-further input if the link is dead. However, this doesn't mean that
-these reactives are immediately allowed to go into the completed state
-since asynchronous / delayed computations started from within
-link-functions could try to push values to these reactives.
+useless. It's called *dead* and will automatically be removed by the
+following mechanism. Links point via `:complete-on-remove` key to
+those reactives that will not receive any further input if the link is
+dead. However, this doesn't mean that these reactives are immediately
+allowed to go into the completed state since asynchronous / delayed
+computations started from within link-functions could try to push
+values to these reactives.
 
 Therefore the network maintains a map in the `:alive-map` entry which
 assigns a counter to a each reactive. This counter is
@@ -624,7 +626,7 @@ initially 1. Automatic completion decreases it by 1. If a link result
 contains the reactive in a `:dont-complete` entry the counter is
 increased. If a link result contains the reactive in the
 `:allow-complete` entry the counter is decreased. If the counter
-reaches 0 the `::completed` value is pushed to the reactives.
+reaches 0 the `::completed` value is delivered to the reactives.
 
 The `:dont-complete` and `:allow-complete` entries are used by link
 functions and the `eval-link` function in case of asynchronous

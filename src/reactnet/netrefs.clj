@@ -4,9 +4,7 @@
             [reactnet.scheduler :as sched]))
 
 
-
-
-(defrecord AgentNetref [max-queue-size n-agent sched]
+(defrecord AgentNetref [max-queue-size n-agent sched mons]
   INetworkRef
   (enq [this stimulus]
     (when (>= (.getQueueCount n-agent) max-queue-size)
@@ -26,7 +24,17 @@
   (scheduler [this]
     sched)
   (network [this]
-    @n-agent))
+    @n-agent)
+  (monitors [this]
+    mons))
+
+
+
+(defn ^:no-doc make-empty-monitors
+  []
+  {'update-and-propagate (atom nil)
+   'eval-links (atom nil)
+   'test (atom nil)})
 
 
 (def max-queue-size 5000)
@@ -34,10 +42,10 @@
 (defn agent-netref
   "Wraps and returns the network in an agent based NetworkRef."
   [network]
-  (AgentNetref. max-queue-size (agent network) (sched/scheduler 15)))
+  (AgentNetref. max-queue-size (agent network) (sched/scheduler 15) (make-empty-monitors)))
 
 
-(defrecord AtomNetref [n-atom sched]
+(defrecord AtomNetref [n-atom sched mons]
   INetworkRef
   (enq [this stimulus]
     (binding [*netref* this]
@@ -47,14 +55,16 @@
   (scheduler [this]
     sched)
   (network [this]
-    @n-atom))
+    @n-atom)
+  (monitors [this]
+    mons))
 
 
 (defn atom-netref
   "Wraps and returns the network in an atom based NetworkRef. Only
   used for unit testing."
   [network]
-  (AtomNetref. (atom network) (sched/scheduler 5)))
+  (AtomNetref. (atom network) (sched/scheduler 5) (make-empty-monitors)))
 
 
 
