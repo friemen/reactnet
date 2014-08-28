@@ -32,7 +32,7 @@
 
 (defmacro duration
   "Execute the expressions and measure the duration. 
-  Updates the monitor specfied by key.
+  Updates the monitor specified by key.
   Returns the result of exprs evaluation."
   [monitors key & exprs]
   `(if profile?
@@ -45,7 +45,7 @@
 
 
 (defmacro number
-  "Takes the number v and adds it ti the sum in the monitor specified by key.
+  "Takes the number v and adds it to the sum in the monitor specified by key.
   Returns the monitor map or nil (if profile? is false)."
   [monitors key v]
   `(when profile?

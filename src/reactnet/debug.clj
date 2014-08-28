@@ -3,8 +3,8 @@
   (:require [clojure.java.io :as io]))
 
 
-(def ^:no-doc log? false)
-(def ^:no-doc log-agent (agent []))
+(def log? "True if log statements will be processed." false)
+(def log-agent "Agent that stores all maps issued by a log statement." (agent []))
 
 (defn on
   "Turns logging on."
