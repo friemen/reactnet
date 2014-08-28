@@ -7,6 +7,7 @@
 
 ;; TODO
 ;; fix weakref test
+;; complete-fn is called multiple times
 ;; support IDeref of netrefs
 ;; improve monitoring
 ;; - dynamic monitor creation
@@ -358,10 +359,10 @@
 
 
 ;; TODO attach them to the netref
-(def monitors {'process-results (atom nil)
+(def monitors {'update-from-results (atom nil)
                'add-link (atom nil)
                'remove-links (atom nil)
-               'pending-reactives (atom nil)
+               'pending-and-completed-reactives (atom nil)
                'update-and-propagate (atom nil)
                'eval-links (atom nil)
                'eval-complete-fns (atom nil)
@@ -486,13 +487,27 @@
 (defn ^:no-doc pending-reactives
   "Returns a seq of pending reactives."
   [{:keys [rid-map]}]
-  (prof-time 'pending-reactives (->> rid-map keys (filter pending?) doall)))
+  (->> rid-map keys (filter pending?) doall))
 
 
 (defn ^:no-doc completed-reactives
   "Returns a seq of completed reactives."
   [{:keys [rid-map]}]
   (->> rid-map keys (filter completed?) doall))
+
+
+(defn ^:no-doc pending-and-completed-reactives
+  "Returns a pair [pending-reactives completed-reactives]."
+  [{:keys [rid-map]}]
+  (prof-time
+   'pending-and-completed-reactives
+   (reduce (fn [[prs crs] r]
+             (cond
+              (pending? r) [(conj prs r) crs]
+              (completed? r) [prs (conj crs r)]
+              :else [prs crs]))
+           [[] []]
+           (keys rid-map))))
 
 
 (defn ^:no-doc dependent-links
@@ -508,18 +523,13 @@
 (defn- update-rid-map!
   "Adds input and output reactives to rid-map.
   Returns an updated network."
-  [{:keys [next-rid rid-map ex-rid-map] :as n} link]
+  [{:keys [next-rid rid-map] :as n} link]
   (doseq [r (concat (link-outputs link)
                     (link-inputs link))]
     (when-not (.get rid-map r)
-      (let [rid (or (and ex-rid-map (.get ex-rid-map r))
-                    (swap! next-rid inc))]
-        (dbg/log {:type "rid-map" :r (:label r) :rid rid})
+      (let [rid (swap! next-rid inc)]
         (.put rid-map r rid))))
   n)
-
-#_(def ^:private into-set (fnil into #{}))
-
 
 (defn- update-complete-sets
   [n dont-complete-rs allow-complete-rs]
@@ -575,7 +585,7 @@
                             input-rids)
          alive-map  (reduce (fn [m i]
                               (if-not (get m i)
-                                (do (dbg/log {:type "alive-map" :rid i :c 1}) (assoc m i 1))
+                                (assoc m i 1)
                                 m))
                             alive-map
                             (concat input-rids output-rids))]
@@ -595,19 +605,16 @@
   links-map and level-map. Preserves other existing entries. Returns an
   updated network."
   [{:keys [id rid-map] :as n} links]
-  #_(dbg/log {:type "rebuild" :rs (map :label (keys rid-map))})
   (when rid-map
     (doseq [r (completed-reactives n)]
       (.remove rid-map r)))
-  (dissoc (reduce add-link (assoc n
-                             :rid-map (or rid-map (WeakHashMap.))
-                             :ex-rid-map nil
-                             :pending-removes 0
-                             :links []
-                             :links-map {}
-                             :level-map {})
-                  links)
-          :ex-rid-map))
+  (reduce add-link (assoc n
+                     :rid-map (or rid-map (WeakHashMap.))
+                     :pending-removes 0
+                     :links []
+                     :links-map {}
+                     :level-map {})
+          links))
 
 
 (defn- remove-links
@@ -664,11 +671,11 @@
                                        c   (get m rid)]
                                    (if c
                                      (let [c (+ diff c)]
-                                       (dbg/log {:type "alive-map" :r (:label r) :rid rid :diff diff :c c})
+                                       #_(dbg/log {:type "alive-map" :r (:label r) :rid rid :diff diff :c c})
                                        (if (> c 0)
                                          [(assoc m rid c) rs]
                                          [(dissoc m rid) (conj rs r)]))
-                                     (do (dbg/log {:type "alive-map" :r (:label r) :rid rid}) [m rs]))))
+                                     (do (dbg/log {:type "warning" :r (:label r) :rid rid}) [m rs]))))
                                [alive-map nil]
                                (concat (map vector dont-complete (repeat 1))
                                        (map vector allow-complete (repeat -1))))
@@ -759,7 +766,7 @@
   (doseq [[r vt] rvt-map]
     (if (completed? r)
       (when (not= (first vt) ::completed)
-        (log-text "warning" "Trying to deliver" vt "into completed" r))
+        (log-text "warning" "Trying to deliver" vt "into completed" (:label r)))
       (try (deliver! r vt)
            (catch IllegalStateException ex
              (enq *netref* {:rvt-map {r vt}})))))
@@ -847,17 +854,19 @@
                                    (map (juxt identity :complete-fn))) :when f]
                     (do (dbg/log {:type "compl-fn" :r (:label r) :l (:label l)})
                         (f l r)))]
-     #_(doseq [r completed-rs]
-       (.remove rid-map r))
      (remove nil? results))))
 
 
 (declare propagate-downstream)
 
-(defn- process-results
+
+(defn- update-from-results
+  "Takes results from eval-links, propagates values up- and downstream
+  and applies network changes (add/remove links, complete reactives
+  etc). Returns an updated network."
   [{:keys [rid-map level-map] :as n} [level pending-links link-results completed-rs]]
   (prof-time
-   'process-results
+   'update-from-results
    (let [compl-results (eval-complete-fns n completed-rs)
          results       (concat link-results compl-results)]
      (if (seq results)
@@ -885,8 +894,7 @@
                  (update-complete-sets (mapcat :dont-complete results)
                                        (mapcat :allow-complete results))
                  (auto-complete)
-                 (add-links (mapcat :add results))
-                 (auto-complete)))))
+                 (add-links (mapcat :add results))))))
        (-> n
            (remove-links (remove-links-pred n completed-rs nil))
            (auto-complete)
@@ -895,12 +903,8 @@
 
 (defn- propagate
   "Executes one propagation cycle. Returns the network."
-  ([n]
-     (propagate n [] [nil nil]))
-  ([n pending-rs]
-     (propagate n [] [pending-rs nil]))
-  ([n pending-links [pending-rs completed-rs]]
-     (process-results n (eval-links n pending-links pending-rs completed-rs))))
+  [n pending-links [pending-rs completed-rs]]
+  (update-from-results n (eval-links n pending-links pending-rs completed-rs)))
 
 
 (defn- propagate-downstream
@@ -926,30 +930,34 @@
     (rebuild n links)
     n))
 
+
 (defn update-and-propagate
   "Updates network with the contents of the stimulus map,
-  delivers any values and runs propagation cycles as link-functions
-  return non-empty results.  Returns the network."
+  delivers any values and runs propagation cycles as long as link-functions
+  return non-empty results. Returns the network."
   [network {:keys [exec results rvt-map]}]
   (prof-time
    'update-and-propagate
    (if exec
      (apply-exec network exec)
-     (let [pending-rs   (deliver-values! rvt-map)
-           completed-rs (completed-reactives network)
-           new-links    (mapcat :add results)]
-       (loop [n          (-> network
-                             (process-results [0 nil results completed-rs]) 
-                             (propagate new-links pending-rs))
-              pending-rs (pending-reactives n)]
-         (let [next-n      (-> n
-                               (propagate nil [pending-rs (completed-reactives n)])
-                               (rebuild-if-necessary))
-               progress?   (not (:unchanged? next-n))
-               next-prs    (pending-reactives next-n)]
-           (if (and progress? (seq next-prs))
-             (recur next-n next-prs)
-             next-n)))))))
+     (let [[pending-rs
+            completed-rs] (deliver-values! rvt-map)]
+       (loop [n (-> network
+                    (update-from-results [0 nil results completed-rs])
+                    (propagate (mapcat :add results) [pending-rs nil]))
+              [pending-rs
+               completed-rs] (pending-and-completed-reactives n)]
+         (let [n (-> n
+                     (propagate nil [pending-rs completed-rs])
+                     (rebuild-if-necessary))
+               progress? (not (:unchanged? n))
+               [pending-rs
+                completed-rs] (if progress?
+                                (pending-and-completed-reactives n)
+                                [nil nil])]
+           (if (seq pending-rs)
+             (recur n [pending-rs completed-rs])
+             n)))))))
 
 
 ;; ---------------------------------------------------------------------------
