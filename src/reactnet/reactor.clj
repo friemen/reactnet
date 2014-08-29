@@ -24,6 +24,8 @@
 ;; TODOS
 ;; - Invent marker protocol to support behavior? and eventstream? regardless of impl class
 ;; - err-retry --> support "exponential backoff"
+;; - allow reference to defined behavior in lift
+;;   (by first letting and passing the resulting behavior to lift-* functions)
 
 ;; ===========================================================================
 ;; EXPERIMENTAL NEW REACTOR API IMPL
@@ -92,6 +94,18 @@
   [n & exprs]
   `(binding [reactnet.core/*netref* ~n]
      ~@exprs))
+
+
+(defmacro setup-network
+  [id & let-pairs]
+  `(with-network
+     (network ~id)
+     (let [~@let-pairs]
+       ~(let [let-pairs# (partition 2 let-pairs)]
+          `(assoc {:netref reactnet.core/*netref*}
+                 ~@(interleave
+                       (c/map (comp keyword first) let-pairs#)
+                       (c/map (comp symbol first) let-pairs#)))))))
 
 
 (defn push!
