@@ -27,9 +27,6 @@
 ;; - allow reference to defined behavior in lift
 ;;   (by first letting and passing the resulting behavior to lift-* functions)
 
-;; ===========================================================================
-;; EXPERIMENTAL NEW REACTOR API IMPL
-
 
 (alter-var-root #'reactnet.core/*netref*
                 (fn [_]
@@ -83,6 +80,8 @@
 
 
 (defn network
+  "Creates a new network with an optional id. 
+  If the id is omitted a gensym is used."
   ([]
      (network (str (gensym "network"))))
   ([id]
@@ -90,15 +89,23 @@
       (make-network id []))))
 
 
-(defmacro with-network
+(defmacro with
+  "Changes the dynamic binding of var reactnet.core/*netref* to the
+  given network n."
   [n & exprs]
   `(binding [reactnet.core/*netref* ~n]
      ~@exprs))
 
 
 (defmacro setup-network
+  "Takes an id and a vector of symbol-expr bindings, creates a new
+  network, puts the binding pairs in a let and returns a map that
+  contains the symbols as keys and the values of the expressions as
+  values.  The expressions are evaluated in a with-context (i.e. the
+  new network is dynamically bound to reactnet.core/*netref*).  
+  An additional :netref key points to the new network."
   [id & let-pairs]
-  `(with-network
+  `(with
      (network ~id)
      (let [~@let-pairs]
        ~(let [let-pairs# (partition 2 let-pairs)]
