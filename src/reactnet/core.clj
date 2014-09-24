@@ -713,10 +713,14 @@
 (defn- consume-values!
   "Consumes all values from reactives contained in evaluation results. 
   Returns a seq of completed reactives."
-  [results]
-  (let [reactives (->> results
+  [results pending-links]
+  (let [no-consume (->> pending-links
+                        (mapcat link-inputs)
+                        set)
+        reactives (->> results
                        (remove :no-consume)
                        (mapcat :input-reactives)
+                       (remove no-consume)
                        set)]
     (doseq [r reactives]
       (consume! r))
@@ -761,6 +765,7 @@
                               (sort-by level-map (comparator <))
                               (distinct)
                               (filter ready?))]
+     (log-links "ready" available-links)
      (if (seq available-links)
        (let [level           (or (-> available-links first level-map) 0)             
              same-level?     (fn [l] (= (level-map l) level))
@@ -774,7 +779,7 @@
              link-results    (->> current-links
                                   (map (partial eval-link rvt-map))
                                   doall)
-             completed-rs    (concat completed-rs (consume-values! link-results))]
+             completed-rs    (concat completed-rs (consume-values! link-results pending-links))]
          [level pending-links link-results completed-rs])
        [0 pending-links nil completed-rs]))))
 
@@ -842,17 +847,19 @@
 (defn- propagate-downstream
   "Propagate values to reactives that are guaranteed to be downstream."
   [network pending-links downstream-rvts]
-  (loop [n network
-         rvts downstream-rvts]
+  (loop [n      network
+         rvts   downstream-rvts
+         plinks pending-links]
     (let [[rvt-map remaining-rvts] (reduce (fn [[rvm remaining] [r vt]]
                                              (if (rvm r)
                                                [rvm (conj remaining [r vt])]
                                                [(assoc rvm r vt) remaining]))
                                            [{} []]
                                            rvts)]
-      (if (seq rvt-map)
+      (if (or (seq plinks) (seq rvt-map))
         (recur (propagate n pending-links (deliver-values! rvt-map))
-               remaining-rvts)
+               remaining-rvts
+               nil)
         (dissoc n :unchanged?)))))
 
 

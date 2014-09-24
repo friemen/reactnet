@@ -103,7 +103,7 @@
   contains the symbols as keys and the values of the expressions as
   values.  The expressions are evaluated in a with-context (i.e. the
   new network is dynamically bound to reactnet.core/*netref*).  
-  An additional :netref key points to the new network."
+  An additional :netref key in the resulting map points to the new network."
   [id & let-pairs]
   `(with
      (network ~id)
@@ -116,6 +116,7 @@
 
 
 (defn push!
+  "Push a value to a reactive (or, pair-wise, many values to many reactives)."
   ([r v]
      (push! *netref* r v))
   ([n r v & rvs]
@@ -127,12 +128,15 @@
 
 
 (defn complete!
+  "Complete the given reactives."
   [& rs]
   (doseq [r rs]
     (rn/complete! r)))
 
 
 (defn reset-network!
+  "Remove all links and reactives from the network, cancel all
+  associated scheduled tasks."
   ([]
      (reset-network! *netref*))
   ([n]

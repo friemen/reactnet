@@ -26,7 +26,17 @@ Key ideas of reactnet are:
 * There can be many independent networks, processed by independant
   threads.
 
-
+Limitations:
+* Since value propagations and network changes are done sequentially
+  in one thread this may become a bottleneck, in other words:
+  throughput per network instance will always be limited to what one
+  thread can handle. As one mitigation it helps to use separated
+  networks, the other is to use executors for link-functions
+  that use different threads.
+* As callbacks are not used, reactnet must search for values that it must
+  propagate. A high number of reactives (> 1000) will lead to low
+  throughput. Again separated networks are a remedy.
+  
 
 ## Introduction
 
