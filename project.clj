@@ -1,4 +1,4 @@
-(defproject reactnet "0.1.0-SNAPSHOT"
+(defproject reactnet "0.7.0"
   :description "Consistent value propagation through a reactive network"
   :url "https://github.com/friemen/reactnet"
   :license {:name "Eclipse Public License"
@@ -7,6 +7,6 @@
   :plugins [[codox "0.8.10"]]
   :codox {:defaults {}
           :sources ["src"]
-          :exclude [reactnet.example reactnet.ex-swing reactnet.ex-reactor reactnet.ex-services]
+          :exclude [reactnet.example]
           :src-dir-uri "https://github.com/friemen/reactnet/blob/master/"
           :src-linenum-anchor-prefix "L"})
