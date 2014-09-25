@@ -660,21 +660,21 @@
                                                      ex)))))))
 
 (defn flatmap
-  "Returns an eventstream that passes each item of r to a function
-  f [x -> Reactive]. Consecutively emits all items of those resulting
-  reactives."
-  [f r]
-  {:pre [(fn-spec? f) (reactive? r)]
+  "Returns an eventstream that passes items of rs to a function
+  f [x ... -> Reactive], whenever all rs have a pending item. 
+  Consecutively emits all items of the resulting reactives."
+  [f & rs]
+  {:pre [(fn-spec? f) (every? reactive? rs)]
    :post [(reactive? %)]}
   (let [[executor f] (unpack-fn-spec f)
         new-r    (eventstream :label (unique-name "flatmap"))
         state    (atom (make-reactive-queue new-r)) ]
-    (add-links! *netref* (make-link "flatmap" [r] [new-r]
+    (add-links! *netref* (make-link "flatmap" rs [new-r]
                                     :complete-on-remove [new-r]
                                     :executor executor
                                     :link-fn
                                     (fn [{:keys [input-rvts] :as input}]
-                                      (let [r (f (fvalue input-rvts))]
+                                      (let [r (apply f (values input-rvts))]
                                         (c/swap! state enqueue-reactive state r)))))
     new-r))
 
