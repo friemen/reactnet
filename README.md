@@ -4,6 +4,8 @@ Consistent value propagation through a network of reactives.
 
 [![Build Status](https://travis-ci.org/friemen/reactnet.png?branch=master)](https://travis-ci.org/friemen/reactnet)
 
+[![Clojars Project](http://clojars.org/reactnet/latest-version.svg)](http://clojars.org/reactnet)
+
 [API docs](https://friemen.github.com/reactnet)
 
 The goal is a core for a push-based reactive library that is designed
@@ -702,8 +704,26 @@ stimuli via `enq`. If this also fails the propagation cycle will
 terminate with an exception, which will lead to an agent in an
 erroneous state.
 
+## References
 
-## License
+E.Amsden - [A Survey of Functional Reactive Programming](http://www.cs.rit.edu/~eca7215/frp-independent-study/Survey.pdf)
+
+A.Courtney - [Frappe: Functional Reactive Programming in Java](http://haskell.cs.yale.edu/wp-content/uploads/2011/02/frappe-padl01.pdf)
+
+A.Courtney, C.Elliot - [Genuinely Functional User Interfaces](http://haskell.cs.yale.edu/wp-content/uploads/2011/02/genuinely-functional-guis.pdf)
+
+E.Czaplicki - [ELM: Concurrent FRP for Functional GUIs](http://elm-lang.org/papers/concurrent-frp.pdf)
+
+C.Elliot, P.Hudak - [Functional Reactive Animation](http://conal.net/papers/icfp97/icfp97.pdf)
+
+C.Elliot - [Push-pull functional reactive programming](http://conal.net/papers/push-pull-frp/push-pull-frp.pdf)
+
+I.Maier, T.Rompf, M.Odersky - [Deprecating the Observer Pattern](http://lamp.epfl.ch/~imaier/pub/DeprecatingObserversTR2010.pdf)
+
+L.Meyerovich - [Flapjax: Functional Reactive Web Programming](http://www.cs.brown.edu/research/pubs/theses/ugrad/2007/lmeyerov.pdf)
+
+
+# License
 
 Copyright 2014 F.Riemenschneider
 

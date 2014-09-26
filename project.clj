@@ -9,4 +9,8 @@
           :sources ["src"]
           :exclude [reactnet.example]
           :src-dir-uri "https://github.com/friemen/reactnet/blob/master/"
-          :src-linenum-anchor-prefix "L"})
+          :src-linenum-anchor-prefix "L"}
+  :scm {:name "git"
+        :url "https://github.com/friemen/reactnet"}
+  :repositories [["clojars" {:url "https://clojars.org/repo"
+                             :creds :gpg}]])
