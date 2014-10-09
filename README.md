@@ -579,7 +579,6 @@ TODO Give some more background on
 
 * Topological levels
 * Monitoring
-* Debugging
 * WeakHashMap / WeakReferences for outputs
 
 
@@ -648,6 +647,32 @@ reaches 0 the `::completed` value is delivered to the reactives.
 The `:dont-complete` and `:allow-complete` entries are used by link
 functions and the `eval-link` function in case of asynchronous
 execution.
+
+
+### Debugging / logging
+
+There is a namespace to support the collection of log statements for
+debugging the propagation. Here's how to use it
+
+```clojure
+(require '[reactnet.debug :as dbg])
+(dbg/on)
+;; propagation actions are from now on logged to @dbg/log-agent
+;; its contents is a vector with maps
+;;
+;; to dump the contents to console use
+(dbg/to-console (dbg/lines))
+;;
+;; dbg/lines also accepts a predicate that can be used to filter the entries
+;; aternatively you can use dbg/to-file if you want inspect the output
+;; with an external editor
+;;
+(dbg/clear)
+;; removes all log entries
+;;
+(dbg/off)
+;; turns debug logging off
+```
 
 
 ### Backpressure
