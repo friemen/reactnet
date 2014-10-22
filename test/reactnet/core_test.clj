@@ -337,7 +337,8 @@
                                                            :complete-fn
                                                            (fn [_ r]
                                                              (merge (swap! q-atom switch)
-                                                                    {:remove-by #(= [r] (rn/link-inputs %))})))]}
+                                                                    {:remove-by #(= [r] (rn/link-inputs %))
+                                                                     :add nil})))]}
                                       state)
                                     state))
                          enqueue (fn [state r]
@@ -348,7 +349,7 @@
                    (link (partial swap! r conj) [e2] [])]
       (apply push! (cons e1 ranges))
       (is (= expected @r))
-      (is (= 3 (-> rn/*netref* rn/network :links count))))))
+      (is (= 2 (-> rn/*netref* rn/network :links count))))))
 
 
 (deftest async-exec-test

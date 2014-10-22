@@ -1,4 +1,4 @@
-(defproject reactnet "0.7.0"
+(defproject reactnet "0.7.1"
   :description "Consistent value propagation through a reactive network"
   :url "https://github.com/friemen/reactnet"
   :license {:name "Eclipse Public License"

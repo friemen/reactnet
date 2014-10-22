@@ -94,3 +94,14 @@
         (seq (filter #(= % label) (concat (:inputs x) (:outputs x) (:rs x)))))))
 
 
+(def ^:dynamic *call-stack* [])
+
+(defmacro log-stack
+  "Dynamically adds context information to *call-stack* vector and
+  logs it. Used to build up a stack of context information."
+  [id m & body]
+  `(if log?
+     (binding [*call-stack* (conj *call-stack* (merge ~m {:id ~id}))]
+       (log {:type "stack" :stack *call-stack*})
+       ~@body)
+     (do ~@body)))

@@ -88,6 +88,7 @@
 ;;                        decreased upon allow-complete. If c becomes 0
 ;;                        the corresponding reactive is auto completed
 ;;   :next-rid            Atom containing the next rid to assign
+;;   :completed           A set containing completed reactives
 ;;   :removes             An integer counting how many link removals happened
 ;;                        in order to decide when to rebuild the level-map
 
@@ -599,7 +600,7 @@
 (defn- auto-complete
   "Updates networks alive-map and automatically delivers ::completed
   to all reactives whose alive counter becomes 0. Returns an updated network."
-  [{:keys [rid-map alive-map allow-complete dont-complete] :as n}]
+  [{:keys [rid-map alive-map allow-complete dont-complete completed] :as n}]
   (let [[alive-map
          completables] (reduce (fn [[m rs] [r diff]]
                                  (let [rid (get rid-map r)
@@ -617,10 +618,14 @@
          vt            [::completed (now)]]
     (doseq [r completables]
       (deliver! r vt))
-    (assoc n
-      :alive-map alive-map
-      :allow-complete nil
-      :dont-complete nil)))
+    (let [completed (into (or completed #{})
+                          (filter completed? completables))]
+      (assoc n
+        :alive-map alive-map
+        :allow-complete nil
+        :dont-complete nil
+        :completed completed
+        :unchanged? (and (:unchanged? n) (empty? completed))))))
 
 
 (defn- add-links
@@ -716,15 +721,18 @@
   [results pending-links]
   (let [no-consume (->> pending-links
                         (mapcat link-inputs)
-                        set)
+                        (set))
         reactives (->> results
                        (remove :no-consume)
                        (mapcat :input-reactives)
                        (remove no-consume)
-                       set)]
+                       (set))]
     (doseq [r reactives]
       (consume! r))
-    (filter completed? reactives)))
+    (->> results
+         (mapcat :input-reactives)
+         (set)
+         (filter completed?))))
 
 
 (defn- eval-link
@@ -745,7 +753,7 @@
                    (fn []
                      (let [result-map (safely-exec-link-fn link input)]
                        ;; send changes / values to netref
-                       (log-rvts "async out" (:output-rvts result-map))
+                       #_(log-rvts "async out" (:output-rvts result-map))
                        (enq netref {:results [result-map {:allow-complete (set outputs)}]}))))
           (assoc input :dont-complete (set outputs)))
       (do (log-links "sync" [link])
@@ -821,21 +829,22 @@
         ;; unknown or is lower than current level
         (doseq [[r [v t]] upstream-rvts]
           (enq *netref* {:rvt-map {r [v t]}}))
-        (if unchanged?
-          (assoc n :unchanged? true)
-          (let [n (propagate-downstream n pending-links downstream-rvts)]
-            (-> n
-                (update-complete-sets nil (map first compl-rvts))
-                (auto-complete)
-                (remove-links (remove-links-pred n completed-rs results))
-                (update-complete-sets (mapcat :dont-complete results)
-                                      (mapcat :allow-complete results))
-                (auto-complete)
-                (add-links (mapcat :add results))))))
+        (-> n
+            (dissoc :completed)
+            (propagate-downstream pending-links downstream-rvts)
+            (update-complete-sets nil (map first compl-rvts))
+            (auto-complete)
+            (remove-links (remove-links-pred n completed-rs results))
+            (update-complete-sets (mapcat :dont-complete results)
+                                  (mapcat :allow-complete results))
+            (auto-complete)
+            (add-links (mapcat :add results))
+            (assoc :unchanged? unchanged?)))
       (-> n
+          (dissoc :completed)
+          (assoc :unchanged? true)
           (remove-links (remove-links-pred n completed-rs nil))
-          (auto-complete)
-          (assoc :unchanged? true)))))
+          (auto-complete)))))
 
 
 (defn- propagate
@@ -857,10 +866,10 @@
                                            [{} []]
                                            rvts)]
       (if (or (seq plinks) (seq rvt-map))
-        (recur (propagate n pending-links (deliver-values! rvt-map))
+        (recur (propagate n plinks (deliver-values! rvt-map))
                remaining-rvts
                nil)
-        (dissoc n :unchanged?)))))
+        n))))
 
 
 (defn update-and-propagate
